@@ -40,7 +40,7 @@ jobs:
 
       - name: Compute next version
         id: version
-        uses: paulhatch/semantic-version@v5.4.0
+        uses: paulhatch/semantic-version@v6.0.2
         with:
           tag_prefix: "v"
           # Conventional Commits — `feat!:` or `feat(scope)!:` etc.
