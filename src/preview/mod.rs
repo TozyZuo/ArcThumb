@@ -34,7 +34,7 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use windows::Win32::Foundation::{
-    BOOL, CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER, HINSTANCE, HWND, RECT, S_FALSE,
+    CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER, HINSTANCE, HWND, RECT, S_FALSE,
 };
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, IStream};
@@ -51,7 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GWLP_USERDATA, MSG, MoveWindow, SetParent, SetWindowLongPtrW,
     WINDOW_EX_STYLE, WS_CHILD, WS_VISIBLE,
 };
-use windows::core::{GUID, IUnknown, Interface, PCWSTR, Result, implement, w};
+use windows::core::{BOOL, GUID, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
 use crate::{alog, archive, decode, settings, stream::ComStreamReader};
 
@@ -74,11 +74,11 @@ pub struct ArcThumbPreviewClassFactory;
 impl IClassFactory_Impl for ArcThumbPreviewClassFactory_Impl {
     fn CreateInstance(
         &self,
-        punkouter: Option<&IUnknown>,
+        punkouter: Ref<'_, IUnknown>,
         riid: *const GUID,
         ppvobject: *mut *mut c_void,
     ) -> Result<()> {
-        if punkouter.is_some() {
+        if !punkouter.is_null() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
         if ppvobject.is_null() || riid.is_null() {
@@ -166,7 +166,7 @@ fn guard<F: FnOnce() -> Result<()>>(label: &str, f: F) -> Result<()> {
 // =============================================================================
 
 impl IInitializeWithStream_Impl for ArcThumbPreviewHandler_Impl {
-    fn Initialize(&self, pstream: Option<&IStream>, _grfmode: u32) -> Result<()> {
+    fn Initialize(&self, pstream: Ref<'_, IStream>, _grfmode: u32) -> Result<()> {
         guard("Preview::Initialize", || {
             *self.this.stream.borrow_mut() = pstream.cloned();
             Ok(())
@@ -179,7 +179,7 @@ impl IInitializeWithStream_Impl for ArcThumbPreviewHandler_Impl {
 // =============================================================================
 
 impl IObjectWithSite_Impl for ArcThumbPreviewHandler_Impl {
-    fn SetSite(&self, punksite: Option<&IUnknown>) -> Result<()> {
+    fn SetSite(&self, punksite: Ref<'_, IUnknown>) -> Result<()> {
         guard("Preview::SetSite", || {
             *self.this.site.borrow_mut() = punksite.cloned();
             Ok(())
@@ -236,7 +236,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             if !child.is_invalid() && !hwnd.is_invalid() {
                 let r = self.this.rect.get();
                 unsafe {
-                    let _ = SetParent(child, hwnd);
+                    let _ = SetParent(child, Some(hwnd));
                     let _ = MoveWindow(
                         child,
                         r.left,
@@ -269,7 +269,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                         r.bottom - r.top,
                         true,
                     );
-                    let _ = InvalidateRect(child, None, true);
+                    let _ = InvalidateRect(Some(child), None, true);
                 }
             }
             Ok(())
@@ -311,7 +311,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             } else {
                 // Re-use existing window — just trigger a repaint.
                 unsafe {
-                    let _ = InvalidateRect(self.this.child_hwnd.get(), None, true);
+                    let _ = InvalidateRect(Some(self.this.child_hwnd.get()), None, true);
                 }
             }
             Ok(())
@@ -342,7 +342,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             return Err(windows::core::Error::from_hresult(S_FALSE));
         }
         unsafe {
-            let _ = SetFocus(child);
+            let _ = SetFocus(Some(child));
         }
         Ok(())
     }
@@ -400,9 +400,9 @@ impl ArcThumbPreviewHandler_Impl {
                 r.top,
                 width,
                 height,
-                parent,
+                Some(parent),
                 None,
-                hinstance,
+                Some(hinstance),
                 Some(user_ptr as *const c_void),
             )
         }
@@ -413,7 +413,7 @@ impl ArcThumbPreviewHandler_Impl {
 
         self.this.child_hwnd.set(hwnd);
         unsafe {
-            let _ = InvalidateRect(hwnd, None, true);
+            let _ = InvalidateRect(Some(hwnd), None, true);
         }
         Ok(())
     }

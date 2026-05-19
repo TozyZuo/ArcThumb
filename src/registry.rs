@@ -252,7 +252,7 @@ fn get_dll_path_from_module() -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("GetModuleHandleExW failed: {e}")))?;
 
         let mut buf = vec![0u16; 32768];
-        let len = GetModuleFileNameW(hmodule, &mut buf) as usize;
+        let len = GetModuleFileNameW(Some(hmodule), &mut buf) as usize;
         if len == 0 {
             return Err(io::Error::other("GetModuleFileNameW returned 0"));
         }

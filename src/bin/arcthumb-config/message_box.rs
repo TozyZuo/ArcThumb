@@ -6,7 +6,6 @@
 //! donation prompt runs before the Slint event loop is up — a moment
 //! where Slint's own windows can't be driven.
 
-use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MessageBoxW,
 };
@@ -16,16 +15,12 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn hwnd_null() -> HWND {
-    HWND(std::ptr::null_mut())
-}
-
 pub fn info(title: &str, content: &str) {
     let title_w = to_wide(title);
     let content_w = to_wide(content);
     unsafe {
         MessageBoxW(
-            hwnd_null(),
+            None,
             PCWSTR(content_w.as_ptr()),
             PCWSTR(title_w.as_ptr()),
             MB_OK | MB_ICONINFORMATION,
@@ -38,7 +33,7 @@ pub fn error(title: &str, content: &str) {
     let content_w = to_wide(content);
     unsafe {
         MessageBoxW(
-            hwnd_null(),
+            None,
             PCWSTR(content_w.as_ptr()),
             PCWSTR(title_w.as_ptr()),
             MB_OK | MB_ICONERROR,
@@ -51,7 +46,7 @@ pub fn confirm_warning(title: &str, content: &str) -> bool {
     let content_w = to_wide(content);
     let result = unsafe {
         MessageBoxW(
-            hwnd_null(),
+            None,
             PCWSTR(content_w.as_ptr()),
             PCWSTR(title_w.as_ptr()),
             MB_OKCANCEL | MB_ICONWARNING,
