@@ -111,7 +111,7 @@ unsafe extern "system" fn preview_wnd_proc(
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == DEBOUNCE_TIMER_ID => {
-                let _ = KillTimer(hwnd, DEBOUNCE_TIMER_ID);
+                let _ = KillTimer(Some(hwnd), DEBOUNCE_TIMER_ID);
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     if !ptr.is_null() {
@@ -122,7 +122,7 @@ unsafe extern "system" fn preview_wnd_proc(
             }
             WM_ERASEBKGND => LRESULT(1), // we erase in WM_PAINT
             WM_DESTROY => {
-                let _ = KillTimer(hwnd, DEBOUNCE_TIMER_ID);
+                let _ = KillTimer(Some(hwnd), DEBOUNCE_TIMER_ID);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 LRESULT(0)
             }
@@ -132,9 +132,9 @@ unsafe extern "system" fn preview_wnd_proc(
 }
 
 /// Build a brush for the system window-background colour. Caller
-/// must `DeleteObject` it after use. We can't use the standard
-/// `(COLOR_WINDOW + 1)` HBRUSH trick portably across windows-rs
-/// 0.58 — `CreateSolidBrush` is more obviously correct.
+/// must `DeleteObject` it after use. We don't use the standard
+/// `(COLOR_WINDOW + 1)` HBRUSH trick because `CreateSolidBrush` is
+/// more obviously correct under windows-rs's typed-handle API.
 fn system_window_brush() -> HBRUSH {
     let color = unsafe { GetSysColor(COLOR_WINDOW) };
     unsafe { CreateSolidBrush(COLORREF(color)) }
@@ -211,7 +211,7 @@ fn paint(hwnd: HWND, this: &ArcThumbPreviewHandler, commit: bool) {
                     stretch_cached(hdc, c, off_x, off_y, dest_w, dest_h);
                 }
                 unsafe {
-                    let _ = SetTimer(hwnd, DEBOUNCE_TIMER_ID, DEBOUNCE_DELAY_MS, None);
+                    let _ = SetTimer(Some(hwnd), DEBOUNCE_TIMER_ID, DEBOUNCE_DELAY_MS, None);
                 }
             }
         }
@@ -223,9 +223,9 @@ fn paint(hwnd: HWND, this: &ArcThumbPreviewHandler, commit: bool) {
 /// BitBlt a cached bitmap at its native size.
 fn blit_cached(hdc: windows::Win32::Graphics::Gdi::HDC, c: &CachedBitmap, x: i32, y: i32) {
     unsafe {
-        let mem_dc = CreateCompatibleDC(hdc);
+        let mem_dc = CreateCompatibleDC(Some(hdc));
         let old = SelectObject(mem_dc, HGDIOBJ(c.hbitmap.0));
-        let _ = BitBlt(hdc, x, y, c.width, c.height, mem_dc, 0, 0, SRCCOPY);
+        let _ = BitBlt(hdc, x, y, c.width, c.height, Some(mem_dc), 0, 0, SRCCOPY);
         SelectObject(mem_dc, old);
         let _ = DeleteDC(mem_dc);
     }
@@ -242,11 +242,21 @@ fn stretch_cached(
     dest_h: i32,
 ) {
     unsafe {
-        let mem_dc = CreateCompatibleDC(hdc);
+        let mem_dc = CreateCompatibleDC(Some(hdc));
         let old = SelectObject(mem_dc, HGDIOBJ(c.hbitmap.0));
         let _ = SetStretchBltMode(hdc, STRETCH_HALFTONE);
         let _ = StretchBlt(
-            hdc, x, y, dest_w, dest_h, mem_dc, 0, 0, c.width, c.height, SRCCOPY,
+            hdc,
+            x,
+            y,
+            dest_w,
+            dest_h,
+            Some(mem_dc),
+            0,
+            0,
+            c.width,
+            c.height,
+            SRCCOPY,
         );
         SelectObject(mem_dc, old);
         let _ = DeleteDC(mem_dc);

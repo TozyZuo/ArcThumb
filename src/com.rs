@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::error::Error as StdError;
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{BOOL, CLASS_E_NOAGGREGATION, E_FAIL, E_POINTER};
+use windows::Win32::Foundation::{CLASS_E_NOAGGREGATION, E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Gdi::HBITMAP;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, IStream};
 use windows::Win32::UI::Shell::PropertiesSystem::{
@@ -25,7 +25,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
 use windows::Win32::UI::Shell::{
     IThumbnailProvider, IThumbnailProvider_Impl, WTS_ALPHATYPE, WTSAT_ARGB,
 };
-use windows::core::{GUID, IUnknown, Interface, Result, implement};
+use windows::core::{BOOL, GUID, IUnknown, Interface, Ref, Result, implement};
 
 use crate::{alog, archive, bitmap, decode, limits, settings, stream::ComStreamReader};
 
@@ -76,12 +76,12 @@ pub struct ArcThumbClassFactory;
 impl IClassFactory_Impl for ArcThumbClassFactory_Impl {
     fn CreateInstance(
         &self,
-        punkouter: Option<&IUnknown>,
+        punkouter: Ref<'_, IUnknown>,
         riid: *const GUID,
         ppvobject: *mut *mut c_void,
     ) -> Result<()> {
         // COM aggregation is an advanced feature we don't support.
-        if punkouter.is_some() {
+        if !punkouter.is_null() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
         if ppvobject.is_null() || riid.is_null() {
@@ -120,7 +120,7 @@ pub struct ArcThumbProvider {
 }
 
 impl IInitializeWithStream_Impl for ArcThumbProvider_Impl {
-    fn Initialize(&self, pstream: Option<&IStream>, _grfmode: u32) -> Result<()> {
+    fn Initialize(&self, pstream: Ref<'_, IStream>, _grfmode: u32) -> Result<()> {
         // Initialize is trivial but we still guard it: the #[implement]
         // glue calls it across the COM ABI, so a panic here would be UB.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
