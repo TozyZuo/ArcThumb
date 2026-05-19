@@ -101,7 +101,7 @@ jobs:
 
       - name: Build Inno Setup installer
         if: steps.gate.outputs.skip == 'false'
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.7
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.8
         with:
           path: installer/arcthumb.iss
           options: /O+
