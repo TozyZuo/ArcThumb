@@ -1,0 +1,69 @@
+# Dependabot keeps Cargo crates and GitHub Actions versions current.
+#
+# Groups are tuned so version-locked crate families stay in sync:
+#   - windows + windows-core must move together (shared type system)
+#   - slint + slint-build + i-slint-backend-testing must share the
+#     same minor (the build crate generates code the runtime depends on)
+#
+# Major version bumps for everything else come as individual PRs so
+# breaking changes can be reviewed one at a time. Minor and patch
+# updates outside the locked families are batched into a single PR
+# per week.
+#
+# PRs target develop, not main. The workflow is:
+#   dependabot PR -> develop  (CI runs, manual merge)
+#   develop      -> main      (manual PR, triggers release.yml)
+# This bundles a week of dependency updates into one release instead
+# of one release per merged dependabot PR.
+
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    groups:
+      windows-crates:
+        patterns:
+          - "windows"
+          - "windows-core"
+      slint:
+        patterns:
+          - "slint"
+          - "slint-build"
+          - "i-slint-*"
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    groups:
+      gha-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "github-actions"

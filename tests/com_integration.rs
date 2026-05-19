@@ -398,7 +398,7 @@ fn create_hidden_parent() -> HWND {
             400,
             None,
             None,
-            hinstance,
+            Some(hinstance),
             None,
         )
     }
@@ -458,12 +458,12 @@ fn preview_handler_end_to_end() {
     // GetWindow should now return our child window.
     let child = unsafe { ole.GetWindow().expect("GetWindow failed") };
     assert!(!child.is_invalid(), "child HWND is invalid");
-    let alive = unsafe { IsWindow(child) };
+    let alive = unsafe { IsWindow(Some(child)) };
     assert!(alive.as_bool(), "child window not alive after DoPreview");
 
     // Unload should tear it down.
     unsafe { preview.Unload().expect("Unload failed") };
-    let alive_after = unsafe { IsWindow(child) };
+    let alive_after = unsafe { IsWindow(Some(child)) };
     assert!(
         !alive_after.as_bool(),
         "child window should be destroyed by Unload"

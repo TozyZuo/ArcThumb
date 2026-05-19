@@ -72,7 +72,7 @@ mod tests {
         ISequentialStream, ISequentialStream_Impl, IStream, IStream_Impl, LOCKTYPE, STATSTG, STGC,
         STREAM_SEEK,
     };
-    use windows::core::{HRESULT, Result, implement};
+    use windows::core::{HRESULT, Ref, Result, implement};
 
     // ---------------------------------------------------------------
     // In-memory IStream mock — wraps a Vec<u8> + cursor position.
@@ -154,7 +154,7 @@ mod tests {
 
         fn CopyTo(
             &self,
-            _pstm: Option<&IStream>,
+            _pstm: Ref<'_, IStream>,
             _cb: u64,
             _pcbread: *mut u64,
             _pcbwritten: *mut u64,

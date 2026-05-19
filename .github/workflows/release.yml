@@ -40,7 +40,7 @@ jobs:
 
       - name: Compute next version
         id: version
-        uses: paulhatch/semantic-version@v5.4.0
+        uses: paulhatch/semantic-version@v6.0.2
         with:
           tag_prefix: "v"
           # Conventional Commits — `feat!:` or `feat(scope)!:` etc.
@@ -101,7 +101,7 @@ jobs:
 
       - name: Build Inno Setup installer
         if: steps.gate.outputs.skip == 'false'
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.7
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.8
         with:
           path: installer/arcthumb.iss
           options: /O+
@@ -138,7 +138,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.gate.outputs.skip == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: "v${{ steps.version.outputs.version }}"
           files: target/installer/ArcThumb-Setup.exe

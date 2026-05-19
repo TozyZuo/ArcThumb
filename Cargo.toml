@@ -27,9 +27,8 @@ default = []
 jxl = ["dep:jxl-oxide"]
 
 [dependencies]
-windows-core = "0.58"
-windows = { version = "0.58", features = [
-    "implement",
+windows-core = "0.62"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
@@ -44,15 +43,15 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
 ]}
-winreg = "0.52"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+winreg = "0.56"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 sevenz-rust = "0.6"
 unrar = "0.5"
 tar = "0.4"
 # Streaming XML parser used by the ebook backends (EPUB, FB2). Pure
 # Rust, no allocator surprises, used by widely-deployed crates like
 # `zip` and `sevenz-rust` already so it pulls no new dependencies.
-quick-xml = "0.36"
+quick-xml = "0.39"
 # Used by the FB2 backend to decode the base64-encoded images that
 # FictionBook embeds inline in the document. Pure Rust, ~25 KB.
 base64 = "0.22"
@@ -115,8 +114,8 @@ i-slint-backend-testing = "1.15"
 # Integration tests need to call Win32 APIs directly (LoadLibrary,
 # GetProcAddress, SHCreateMemStream, GDI cleanup) and to talk to
 # arcthumb.dll across the COM ABI like Explorer would.
-windows-core = "0.58"
-windows = { version = "0.58", features = [
+windows-core = "0.62"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
@@ -126,7 +125,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ]}
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Used by archive::tests to compute the file/header CRCs needed to
 # hand-craft a minimal RAR4 fixture in-memory (RAR is a proprietary
