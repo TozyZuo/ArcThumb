@@ -71,6 +71,12 @@ image = { version = "0.25", default-features = false, features = [
 # this decoder entirely.
 jpeg-decoder = "0.3"
 jxl-oxide = { version = "0.12", features = ["image"], optional = true }
+# Pure-Rust glyph rasteriser for the identification-label overlay
+# baked into thumbnails. We embed a tiny A–Z/0–9 subset of Roboto
+# Bold (see assets/fonts/) so labels stay crisp at every Explorer
+# icon size. Only pulled onto the hot path when the label overlay is
+# enabled; it is off by default.
+ab_glyph = "0.2"
 # Slint is the GUI toolkit for the `arcthumb-config` binary. Strings
 # are passed from Rust to the Slint UI via properties for now; the
 # language is picked at startup from the registry override and OS

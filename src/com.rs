@@ -18,7 +18,9 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CLASS_E_NOAGGREGATION, E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Gdi::HBITMAP;
-use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, IStream};
+use windows::Win32::System::Com::{
+    CoTaskMemFree, IClassFactory, IClassFactory_Impl, IStream, STATFLAG_DEFAULT, STATSTG,
+};
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithStream, IInitializeWithStream_Impl,
 };
@@ -27,7 +29,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{BOOL, GUID, IUnknown, Interface, Ref, Result, implement};
 
-use crate::{alog, archive, bitmap, decode, limits, settings, stream::ComStreamReader};
+use crate::{alog, archive, bitmap, decode, limits, overlay, settings, stream::ComStreamReader};
 
 /// End-to-end: stream → archive → first image bytes → decode → resize → HBITMAP.
 ///
@@ -37,9 +39,22 @@ fn try_generate_thumbnail(
     stream: IStream,
     cx: u32,
 ) -> std::result::Result<HBITMAP, Box<dyn StdError>> {
+    let settings = settings::current();
+
+    // Recover the on-disk extension (when the host exposes a name on
+    // the stream) so the identification label can read "CBZ" instead
+    // of the generic "ZIP". Best-effort: `None` falls back to the
+    // content-detected format. Done before the reader takes the stream.
+    let file_ext = stream_file_ext(&stream);
+
     let reader = ComStreamReader::new(stream);
-    let (name, bytes) = archive::read_first_image(reader, settings::current())?;
-    alog!("  picked: {name} ({} bytes)", bytes.len());
+    let extracted = archive::read_first_image_with_kind(reader, settings)?;
+    alog!(
+        "  picked: {} ({} bytes, ext={:?})",
+        extracted.name,
+        extracted.bytes.len(),
+        file_ext
+    );
 
     // Format-dispatching decoder with pre-decode size guards against
     // decompression bombs. `decode_for_thumbnail` additionally asks
@@ -48,18 +63,58 @@ fn try_generate_thumbnail(
     // multi-megapixel comic page is delivered at roughly twice the
     // target size instead of at full resolution, cutting the decode
     // cost by up to ~16×.
-    let img = decode::decode_for_thumbnail(&name, &bytes, cx)?;
+    let img = decode::decode_for_thumbnail(&extracted.name, &extracted.bytes, cx)?;
     alog!("  decoded: {}x{}", img.width(), img.height());
 
     // Preserve aspect ratio, fit inside cx × cx. `Triangle` (bilinear)
     // is a good default — fast and visually fine at thumbnail sizes.
-    let resized = img
+    let mut resized = img
         .resize(cx, cx, image::imageops::FilterType::Triangle)
         .to_rgba8();
     alog!("  resized: {}x{}", resized.width(), resized.height());
 
+    // Bake the identification overlay (border / format label) when the
+    // user has opted in. A no-op by default, so existing installs keep
+    // the bare cover image.
+    overlay::apply_overlay(&mut resized, extracted.kind, file_ext.as_deref(), settings);
+
     let hbmp = bitmap::from_rgba(&resized)?;
     Ok(hbmp)
+}
+
+/// Best-effort lookup of the source file's extension via the stream's
+/// `Stat` name. Explorer initialises us with a bare `IStream`
+/// (`IInitializeWithStream`), so this is the only handle we have on
+/// the original file name — and many stream backends leave it unset,
+/// in which case we return `None` and the overlay falls back to the
+/// content-detected format.
+///
+/// Returns the extension lowercased and without the dot, e.g. `"cbz"`.
+fn stream_file_ext(stream: &IStream) -> Option<String> {
+    let mut stat = STATSTG::default();
+    // STATFLAG_DEFAULT asks the stream to populate `pwcsName`.
+    unsafe { stream.Stat(&mut stat, STATFLAG_DEFAULT).ok()? };
+    if stat.pwcsName.is_null() {
+        return None;
+    }
+    // `pwcsName` is a COM-allocated NUL-terminated wide string we now
+    // own: copy it out, then return the buffer to the task allocator.
+    let name = unsafe { stat.pwcsName.to_string().ok() };
+    unsafe { CoTaskMemFree(Some(stat.pwcsName.0 as *const std::ffi::c_void)) };
+    extension_of(&name?)
+}
+
+/// Extract the lowercased extension (no dot) from a file name or path.
+/// Splits on the last path separator first so a dotted directory name
+/// can't be mistaken for the extension.
+fn extension_of(name: &str) -> Option<String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let (_, ext) = base.rsplit_once('.')?;
+    if ext.is_empty() {
+        None
+    } else {
+        Some(ext.to_ascii_lowercase())
+    }
 }
 
 /// CLSID for the ArcThumb thumbnail provider COM class.
@@ -209,6 +264,19 @@ fn clamp_thumbnail_size(cx: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_of_handles_names_and_paths() {
+        assert_eq!(extension_of("book.cbz").as_deref(), Some("cbz"));
+        assert_eq!(extension_of("BOOK.CBZ").as_deref(), Some("cbz"));
+        // Last extension wins; the FB2/EPUB content kind overrides this
+        // upstream anyway.
+        assert_eq!(extension_of("novel.fb2.zip").as_deref(), Some("zip"));
+        // A dotted folder must not be read as the extension.
+        assert_eq!(extension_of("C:\\my.archives\\comic").as_deref(), None);
+        assert_eq!(extension_of("comic").as_deref(), None);
+        assert_eq!(extension_of("trailing.").as_deref(), None);
+    }
 
     #[test]
     fn clamp_within_range_is_identity() {

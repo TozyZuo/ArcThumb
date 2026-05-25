@@ -40,12 +40,12 @@ export component MainWindow inherits Window {
     icon: @image-url("../assets/icon.png");
     preferred-width: 520px;
     // Tuned so the bottom-row buttons sit a comfortable 12-16 px
-    // below "Enable preview pane" at default size. Larger windows
-    // grow that gap because the spacer Rectangle below has
+    // below the last checkbox at default size. Larger windows grow
+    // that gap because the spacer Rectangle below has
     // `vertical-stretch: 1`; the floor is set by `min-height`.
-    preferred-height: 520px;
+    preferred-height: 600px;
     min-width: 500px;
-    min-height: 500px;
+    min-height: 580px;
 
     // ---- Localized labels (set from Rust at startup) -------------
     in property <string> window_title;
@@ -60,6 +60,8 @@ export component MainWindow inherits Window {
     in property <string> sort_alpha_label;
     in property <string> prefer_cover_label;
     in property <string> enable_preview_label;
+    in property <string> overlay_border_label;
+    in property <string> overlay_label_label;
     in property <string> btn_ok;
     in property <string> btn_cancel;
     in property <string> btn_apply;
@@ -76,6 +78,8 @@ export component MainWindow inherits Window {
     in-out property <bool> sort_natural;
     in-out property <bool> prefer_cover;
     in-out property <bool> enable_preview;
+    in-out property <bool> overlay_border;
+    in-out property <bool> overlay_label;
 
     // ---- Callbacks ----------------------------------------------
     callback ok_clicked();
@@ -187,6 +191,18 @@ export component MainWindow inherits Window {
             vertical-stretch: 0;
             text: root.enable_preview_label;
             checked <=> root.enable_preview;
+        }
+
+        CheckBox {
+            vertical-stretch: 0;
+            text: root.overlay_border_label;
+            checked <=> root.overlay_border;
+        }
+
+        CheckBox {
+            vertical-stretch: 0;
+            text: root.overlay_label_label;
+            checked <=> root.overlay_label;
         }
 
         // The only stretchy element. Absorbs all extra height when

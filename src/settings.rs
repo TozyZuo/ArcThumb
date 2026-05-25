@@ -11,6 +11,8 @@
 //!     SortOrder         REG_SZ    "natural" | "alphabetical"
 //!     PreferCoverNames  REG_DWORD 0 | 1
 //!     EnabledImageExts  REG_DWORD bitmask over SUPPORTED_IMAGE_EXTS
+//!     OverlayBorder     REG_DWORD 0 | 1
+//!     OverlayLabel      REG_DWORD 0 | 1
 //! ```
 //!
 //! Users can tweak these by hand in `regedit` until a proper config
@@ -91,6 +93,18 @@ pub struct Settings {
     /// archives. Only bits < `SUPPORTED_IMAGE_EXTS.len()` are
     /// meaningful; higher bits are ignored.
     pub enabled_image_exts_mask: u32,
+    /// Bake a coloured identification border into the thumbnail, so
+    /// archives are easier to tell apart from plain images in
+    /// Explorer. The colour reflects the format family (compressed
+    /// archive / e-book / other). Off by default — opting in changes
+    /// how every archive thumbnail looks, so existing installs keep
+    /// the bare cover image until the user asks for the border.
+    pub overlay_border: bool,
+    /// Bake a small format label (`CBZ`, `EPUB`, …) into the corner
+    /// of the thumbnail. Off by default for the same reason as
+    /// [`Self::overlay_border`]. Dropped automatically at very small
+    /// thumbnail sizes where the text would be unreadable.
+    pub overlay_label: bool,
 }
 
 impl Default for Settings {
@@ -99,6 +113,8 @@ impl Default for Settings {
             sort_order: SortOrder::Natural,
             prefer_cover_names: true,
             enabled_image_exts_mask: default_enabled_image_exts_mask(),
+            overlay_border: false,
+            overlay_label: false,
         }
     }
 }
@@ -137,6 +153,12 @@ impl Settings {
             // with more supported formats can't light up phantom
             // entries after a downgrade.
             out.enabled_image_exts_mask = v & default_enabled_image_exts_mask();
+        }
+        if let Ok(v) = key.get_value::<u32, _>("OverlayBorder") {
+            out.overlay_border = v != 0;
+        }
+        if let Ok(v) = key.get_value::<u32, _>("OverlayLabel") {
+            out.overlay_label = v != 0;
         }
         out
     }
@@ -189,6 +211,10 @@ impl Settings {
         key.set_value("PreferCoverNames", &flag)?;
         let mask = self.enabled_image_exts_mask & default_enabled_image_exts_mask();
         key.set_value("EnabledImageExts", &mask)?;
+        let border: u32 = if self.overlay_border { 1 } else { 0 };
+        key.set_value("OverlayBorder", &border)?;
+        let label: u32 = if self.overlay_label { 1 } else { 0 };
+        key.set_value("OverlayLabel", &label)?;
         Ok(())
     }
 }
@@ -454,6 +480,10 @@ mod tests {
             default_enabled_image_exts_mask(),
             "default must enable every supported image extension"
         );
+        // Identification overlay ships off so existing installs keep
+        // their bare cover thumbnails until the user opts in.
+        assert!(!s.overlay_border, "border overlay defaults off");
+        assert!(!s.overlay_label, "label overlay defaults off");
     }
 
     /// RAII helper that picks a unique throwaway subkey under
@@ -492,6 +522,8 @@ mod tests {
             sort_order: SortOrder::Alphabetical,
             prefer_cover_names: false,
             enabled_image_exts_mask: 0b1010_1010,
+            overlay_border: true,
+            overlay_label: true,
         };
         original
             .save_to_subkey(scratch.path())
@@ -503,6 +535,8 @@ mod tests {
         assert_eq!(loaded.sort_order, SortOrder::Alphabetical);
         assert!(!loaded.prefer_cover_names);
         assert_eq!(loaded.enabled_image_exts_mask, expected_mask);
+        assert!(loaded.overlay_border, "border overlay round-trips");
+        assert!(loaded.overlay_label, "label overlay round-trips");
     }
 
     #[test]
