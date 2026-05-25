@@ -4,6 +4,7 @@
 use std::error::Error;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::limits;
@@ -76,13 +77,26 @@ pub(super) fn rar_read_first_image<R: Read>(
 /// Build a unique-ish temp file path for spooling an archive.
 /// We don't need cryptographic uniqueness, just collision avoidance
 /// between concurrent Explorer threads.
+///
+/// `pid` keeps separate processes apart and `nanos` keeps separate
+/// runs apart, but neither is enough on its own: Explorer extracts
+/// thumbnails on a pool of threads that share one pid, and the system
+/// clock is coarse enough (especially on Windows) that two threads can
+/// read the same nanosecond. Without a tiebreaker they'd land on the
+/// same path and `File::create` would truncate one thread's archive
+/// out from under the other. The atomic counter is that tiebreaker: it
+/// hands every call within the process a distinct value, so two
+/// in-flight extractions can never collide.
 fn make_temp_path(ext: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let name = format!("arcthumb_{pid}_{nanos}.{ext}");
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("arcthumb_{pid}_{nanos}_{seq}.{ext}");
     Path::new(&std::env::temp_dir()).join(name)
 }
 
@@ -278,6 +292,36 @@ mod tests {
                 .unwrap_or_else(|e| panic!("rar ext {ext} solo-enabled failed: {e}"));
             assert_eq!(name, entry);
         }
+    }
+
+    #[test]
+    fn make_temp_path_is_unique_across_concurrent_calls() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        // Explorer spools RAR archives on a pool of threads that share
+        // one pid. Uniqueness used to rest on the wall clock alone, so
+        // two threads reading the same coarse nanosecond got the same
+        // path and `File::create` truncated one archive out from under
+        // the other — the race behind the flaky `rar_*` failures. Hammer
+        // the generator from several threads and confirm every path is
+        // distinct.
+        let paths = Arc::new(Mutex::new(HashSet::new()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let paths = Arc::clone(&paths);
+            handles.push(thread::spawn(move || {
+                for _ in 0..1000 {
+                    let p = super::make_temp_path("rar");
+                    paths.lock().unwrap().insert(p);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(paths.lock().unwrap().len(), 8 * 1000);
     }
 
     #[test]
