@@ -2,8 +2,9 @@
 
 ArcThumb itself is distributed under **MIT OR Apache-2.0** (see
 `LICENSE-MIT` and `LICENSE-APACHE`). The following third-party
-components are redistributed with `arcthumb-config.exe` and require
-separate acknowledgement.
+components are redistributed with ArcThumb (the `arcthumb.dll` shell
+extension and/or `arcthumb-config.exe`) and require separate
+acknowledgement.
 
 ## Slint
 
@@ -21,6 +22,18 @@ logo and links back to https://slint.dev/.
 
 Slint's own source is not modified and is linked statically into the
 binary via the `slint` crate.
+
+## Roboto (font)
+
+`arcthumb.dll` embeds an A–Z / 0–9 subset of **Roboto Bold**
+(Copyright 2015 Google Inc.) to draw the format labels in the
+identification overlay. Roboto is licensed under the **Apache License
+2.0**.
+
+The subset font and a copy of its license live in `assets/fonts/`
+(`Roboto-Bold-subset.ttf`, `LICENSE-Roboto.txt`); the subsetting
+command is recorded in `assets/fonts/README.md`. Only the glyph data
+is reduced — the outlines themselves are unmodified.
 
 ---
 

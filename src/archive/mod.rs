@@ -31,16 +31,60 @@ use crate::settings::Settings;
 
 use detect::{Format, detect_format};
 
+/// What kind of archive the cover image was pulled from. Derived from
+/// the detected magic bytes, refined by content inspection for ZIP
+/// containers (a plain ZIP, an EPUB, and an FB2-in-ZIP all share the
+/// `PK` signature but are told apart by their contents).
+///
+/// Drives the identification overlay: the colour family of the border
+/// and the fallback label text. It deliberately does *not* try to
+/// recover the on-disk extension (`.cbz` vs `.zip`) — the thumbnail
+/// provider only sees a stream, so that distinction is the overlay
+/// renderer's job using the file name when it can get one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    Zip,
+    SevenZ,
+    Rar,
+    Tar,
+    Epub,
+    Fb2,
+    Mobi,
+}
+
+/// The first image found in an archive, plus what kind of archive it
+/// came from. Returned by [`read_first_image_with_kind`].
+pub struct Extracted {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub kind: ContentKind,
+}
+
 /// Open an archive stream, pick the first image, return `(name, bytes)`.
+///
+/// Thin wrapper over [`read_first_image_with_kind`] for callers (the
+/// preview handler, most tests) that don't need the archive kind.
 ///
 /// The caller supplies the [`Settings`] snapshot that governs
 /// image-extension filtering and sort order. This keeps the
 /// archive module free of global state — the shell extension
 /// obtains settings via [`settings::current()`] and passes them in.
 pub fn read_first_image<R: Read + Seek>(
-    mut reader: R,
+    reader: R,
     settings: &Settings,
 ) -> Result<(String, Vec<u8>), Box<dyn Error>> {
+    let extracted = read_first_image_with_kind(reader, settings)?;
+    Ok((extracted.name, extracted.bytes))
+}
+
+/// Like [`read_first_image`], but also reports the [`ContentKind`] so
+/// the thumbnail pipeline can draw a format-aware identification
+/// overlay. Only the ZIP backend inspects contents to distinguish
+/// EPUB / FB2 / plain ZIP; every other format maps 1:1 from its magic.
+pub fn read_first_image_with_kind<R: Read + Seek>(
+    mut reader: R,
+    settings: &Settings,
+) -> Result<Extracted, Box<dyn Error>> {
     // Size guard: check total stream length before touching any parser.
     let total = reader.seek(SeekFrom::End(0))?;
     if total > limits::MAX_ARCHIVE_SIZE {
@@ -59,15 +103,31 @@ pub fn read_first_image<R: Read + Seek>(
     reader.by_ref().take(512).read_to_end(&mut magic)?;
     reader.seek(SeekFrom::Start(0))?;
 
-    match detect_format(&magic) {
-        Format::Zip => zip::zip_read_first_image(reader, settings),
-        Format::SevenZ => sevenz::sevenz_read_first_image(reader, settings),
-        Format::Rar => rar::rar_read_first_image(reader, settings),
-        Format::Tar => tar::tar_read_first_image(reader, settings),
-        Format::Fb2 => fb2::fb2_read_first_image(reader),
-        Format::Mobi => mobi::mobi_read_first_image(reader),
-        Format::Unknown => Err("unrecognised archive format".into()),
-    }
+    let (name, bytes, kind) = match detect_format(&magic) {
+        Format::Zip => zip::zip_read_first_image(reader, settings)?,
+        Format::SevenZ => with_kind(
+            sevenz::sevenz_read_first_image(reader, settings)?,
+            ContentKind::SevenZ,
+        ),
+        Format::Rar => with_kind(
+            rar::rar_read_first_image(reader, settings)?,
+            ContentKind::Rar,
+        ),
+        Format::Tar => with_kind(
+            tar::tar_read_first_image(reader, settings)?,
+            ContentKind::Tar,
+        ),
+        Format::Fb2 => with_kind(fb2::fb2_read_first_image(reader)?, ContentKind::Fb2),
+        Format::Mobi => with_kind(mobi::mobi_read_first_image(reader)?, ContentKind::Mobi),
+        Format::Unknown => return Err("unrecognised archive format".into()),
+    };
+    Ok(Extracted { name, bytes, kind })
+}
+
+/// Tack a fixed [`ContentKind`] onto a backend's `(name, bytes)` pair.
+/// Used for the formats whose magic maps unambiguously to one kind.
+fn with_kind(pair: (String, Vec<u8>), kind: ContentKind) -> (String, Vec<u8>, ContentKind) {
+    (pair.0, pair.1, kind)
 }
 
 #[cfg(test)]

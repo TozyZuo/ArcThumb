@@ -17,7 +17,8 @@ ArcThumb is inspired by [CBXShell](https://github.com/T800G/CBXShell) and [DarkT
 - Shows the first image (or the cover, if one is identifiable) from an archive as the file's thumbnail in Explorer.
 - For ebooks, parses the format-specific metadata so the right cover is picked instead of an arbitrary embedded image. EPUB uses the OPF manifest, FB2 uses the `<coverpage>` reference, and MOBI/AZW/AZW3 use the EXTH 201 CoverOffset record.
 - Implements `IPreviewHandler` so the same cover shows up in Explorer's preview pane (`Alt+P`), rescaled when the splitter moves.
-- Provides a small configuration GUI (`arcthumb-config.exe`) for toggling extensions, sort order, cover-name preference, the preview pane, and the UI language.
+- Can bake an identification overlay into archive thumbnails — a format-coloured border and a corner label (`CBZ`, `EPUB`, …) — so archives stand out from plain images. Off by default.
+- Provides a small configuration GUI (`arcthumb-config.exe`) for toggling extensions, sort order, cover-name preference, the preview pane, the identification overlay, and the UI language.
 - Installs per-user under `%LOCALAPPDATA%\Programs\ArcThumb` by default with no admin rights. Run the installer elevated to install machine-wide under `%ProgramFiles%\ArcThumb` instead — required when Explorer runs at high integrity, such as Windows Sandbox.
 - Wraps every COM entry point in `catch_unwind`, so a panic in the decoder cannot crash Explorer or `prevhost.exe`.
 
@@ -56,7 +57,15 @@ Open **ArcThumb Configuration** from the Start menu.
 - **Sort order** decides which image counts as "the first one" inside an archive. Natural sort treats `page2.jpg` as smaller than `page10.jpg`. Alphabetical does the opposite. Natural is the default and is usually what you want for comics.
 - **Prefer cover / folder / thumb / front** makes ArcThumb look for files named `cover.*`, `folder.*`, `thumb.*`, `thumbnail.*`, or `front.*` before falling back to sort order.
 - **Enable preview pane** is a single switch that registers or unregisters the `IPreviewHandler` for every supported extension at once.
+- **Mark archives with a coloured border** draws a frame around the thumbnail, coloured by format family (one colour for compressed archives, another for ebooks). It makes an archive cover easy to tell apart from a plain image.
+- **Mark archives with a format label** bakes a small `CBZ` / `EPUB` / … tag into the bottom-right corner. The label uses the file's extension when ArcThumb can read it and otherwise falls back to the detected format, so a `.cbz` reads "CBZ" but a renamed archive still gets a sensible tag. The label is dropped on very small icons where it would be unreadable; the border stays.
 - **Language** is English or Japanese. The first run picks one based on `GetUserDefaultLocaleName`; afterwards it lives in `HKCU\Software\ArcThumb\Language`.
+
+Both overlay options are off by default. The plain cover thumbnails shown at the top of this page are what you get out of the box; turning the overlay on changes how every archive thumbnail looks:
+
+![The same Explorer folder with the identification overlay enabled: each archive has a format-coloured border and a corner label such as ZIP, RAR, or EPUB](assets/explorer_with_overlay.png)
+
+Because Explorer caches the rendered bitmap, a new overlay setting only takes effect once the cached thumbnails are rebuilt. Use **Regenerate thumbnails** after changing either toggle.
 
 Apply takes effect immediately. There is no service to restart.
 
