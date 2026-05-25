@@ -55,8 +55,8 @@ impl FormatGroup {
     /// two read as one identity colour.
     fn color(self) -> Rgba<u8> {
         match self {
-            // Warm orange for compressed archives.
-            FormatGroup::Archive => Rgba([217, 130, 43, 255]),
+            // Folder-like yellow for compressed archives.
+            FormatGroup::Archive => Rgba([240, 195, 70, 255]),
             // Cool indigo for e-books.
             FormatGroup::Ebook => Rgba([58, 124, 165, 255]),
             // Neutral grey fallback.
@@ -228,15 +228,37 @@ fn draw_label_text(img: &mut RgbaImage, text: &str, chip: Rgba<u8>) {
     let chip_x = w.saturating_sub(chip_w).saturating_sub(margin);
     let chip_y = h.saturating_sub(chip_h).saturating_sub(margin);
 
-    // Opaque chip background.
+    // The text and the chip's outline share one colour, picked for
+    // contrast against the fill. The outline keeps the chip readable
+    // even when the cover behind it is the same hue as the fill.
+    let text_color = pick_text_color(chip);
+
+    // Rounded chip, anti-aliased at the corners via a rounded-rectangle
+    // signed-distance field. We paint the outline colour across the
+    // whole shape, then the fill over an inset copy of it, leaving a
+    // stroke of width `outline_w` around the edge.
+    let fw = chip_w as f32;
+    let fh = chip_h as f32;
+    let radius = (fh * 0.28).min(fw / 2.0).min(fh / 2.0);
+    let outline_w = (font_px * 0.09).max(1.5);
     for y in chip_y..(chip_y + chip_h).min(h) {
         for x in chip_x..(chip_x + chip_w).min(w) {
-            img.put_pixel(x, y, chip);
+            let lx = (x - chip_x) as f32 + 0.5;
+            let ly = (y - chip_y) as f32 + 0.5;
+            let d = rounded_rect_sdf(lx, ly, fw, fh, radius);
+            let shape_cov = (0.5 - d).clamp(0.0, 1.0);
+            if shape_cov <= 0.0 {
+                continue;
+            }
+            // Inset shape: 1 inside the fill region, 0 in the stroke band.
+            let fill_cov = (0.5 - (d + outline_w)).clamp(0.0, 1.0);
+            let dst = img.get_pixel_mut(x, y);
+            let outlined = blend(*dst, text_color, shape_cov);
+            *dst = blend(outlined, chip, fill_cov);
         }
     }
 
     // Glyphs, blended over the chip with their coverage.
-    let text_color = pick_text_color(chip);
     let origin_x = chip_x as f32 + pad_x;
     let origin_y = chip_y as f32 + pad_y;
     for glyph in glyphs {
@@ -257,6 +279,20 @@ fn draw_label_text(img: &mut RgbaImage, text: &str, chip: Rgba<u8>) {
             }
         });
     }
+}
+
+/// Signed distance from the pixel at local `(lx, ly)` to the edge of a
+/// rounded rectangle of size `w` × `h` with corner `radius`, all
+/// measured from the rectangle's top-left. Negative inside the shape.
+/// The standard rounded-box SDF.
+fn rounded_rect_sdf(lx: f32, ly: f32, w: f32, h: f32, radius: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    // Offset from the centre of the inner box the corner arcs ride on.
+    let qx = (lx - hw).abs() - (hw - radius);
+    let qy = (ly - hh).abs() - (hh - radius);
+    let outside = qx.max(0.0).hypot(qy.max(0.0));
+    let inside = qx.max(qy).min(0.0);
+    outside + inside - radius
 }
 
 /// Alpha-blend `src` over `dst` by `coverage` (0..=1). The result stays
@@ -360,6 +396,29 @@ mod tests {
             pick_text_color(FormatGroup::Ebook.color()),
             Rgba([255, 255, 255, 255])
         );
+        // The folder yellow is bright, so text (and the matching chip
+        // outline) come out black.
+        assert_eq!(
+            pick_text_color(FormatGroup::Archive.color()),
+            Rgba([0, 0, 0, 255])
+        );
+    }
+
+    // ----- rounded chip -------------------------------------------------
+
+    #[test]
+    fn rounded_rect_carves_corners_but_keeps_center_solid() {
+        // Fill coverage the chip draw derives from the SDF.
+        let cov = |lx, ly, w, h, r| (0.5 - rounded_rect_sdf(lx, ly, w, h, r)).clamp(0.0, 1.0);
+        let (w, h, r) = (40.0, 24.0, 8.0);
+        // Centre is fully inside.
+        assert_eq!(cov(20.0, 12.0, w, h, r), 1.0);
+        // The extreme top-left pixel sits beyond the corner arc.
+        assert!(cov(0.5, 0.5, w, h, r) < 1.0);
+        // A mid-edge pixel (not a corner) stays solid.
+        assert_eq!(cov(0.5, 12.0, w, h, r), 1.0);
+        // radius 0 degrades to a plain rectangle: the corner is solid.
+        assert_eq!(cov(0.5, 0.5, w, h, 0.0), 1.0);
     }
 
     // ----- apply_overlay behaviour ---------------------------------------
@@ -420,5 +479,56 @@ mod tests {
             }
         }
         assert!(changed, "expected changes in the bottom-right quadrant");
+    }
+
+    /// Render a montage of every group/label on a few backgrounds and
+    /// write it to `target/overlay-samples.png` for eyeballing the
+    /// palette. Ignored by default; run on demand with:
+    /// `cargo test --lib render_overlay_samples -- --ignored --nocapture`
+    #[test]
+    #[ignore = "writes a sample PNG for reviewing overlay colours by eye"]
+    fn render_overlay_samples() {
+        let cell: u32 = 220;
+        let pad: u32 = 10;
+        let samples: &[(ContentKind, Option<&str>)] = &[
+            (ContentKind::Zip, Some("cbz")),
+            (ContentKind::Zip, Some("zip")),
+            (ContentKind::Rar, Some("cbr")),
+            (ContentKind::Epub, Some("epub")),
+            (ContentKind::Mobi, None),
+        ];
+        // Last background deliberately matches the archive fill hue, to
+        // check the outline keeps the chip legible when they collide.
+        let backgrounds: &[Rgba<u8>] = &[
+            Rgba([90, 90, 90, 255]),
+            Rgba([235, 235, 235, 255]),
+            Rgba([60, 120, 160, 255]),
+            Rgba([238, 198, 82, 255]),
+        ];
+        let settings = Settings {
+            overlay_border: true,
+            overlay_label: true,
+            ..Settings::default()
+        };
+
+        let cols = backgrounds.len() as u32;
+        let rows = samples.len() as u32;
+        let mut montage = RgbaImage::from_pixel(cols * cell, rows * cell, Rgba([24, 24, 24, 255]));
+        for (r, (kind, ext)) in samples.iter().enumerate() {
+            for (c, bg) in backgrounds.iter().enumerate() {
+                let mut tile = RgbaImage::from_pixel(cell - 2 * pad, cell - 2 * pad, *bg);
+                apply_overlay(&mut tile, *kind, *ext, &settings);
+                let (ox, oy) = (c as u32 * cell + pad, r as u32 * cell + pad);
+                for (x, y, px) in tile.enumerate_pixels() {
+                    montage.put_pixel(ox + x, oy + y, *px);
+                }
+            }
+        }
+
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("overlay-samples.png");
+        montage.save(&out).expect("save montage");
+        println!("overlay samples written to {}", out.display());
     }
 }
