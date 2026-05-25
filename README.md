@@ -61,7 +61,11 @@ Open **ArcThumb Configuration** from the Start menu.
 - **Mark archives with a format label** bakes a small `CBZ` / `EPUB` / … tag into the bottom-right corner. The label uses the file's extension when ArcThumb can read it and otherwise falls back to the detected format, so a `.cbz` reads "CBZ" but a renamed archive still gets a sensible tag. The label is dropped on very small icons where it would be unreadable; the border stays.
 - **Language** is English or Japanese. The first run picks one based on `GetUserDefaultLocaleName`; afterwards it lives in `HKCU\Software\ArcThumb\Language`.
 
-Both overlay options are off by default, so turning one on changes how every archive thumbnail looks. The new look only shows up once the cached thumbnails are rebuilt — Explorer caches the old bitmap. Use **Regenerate thumbnails** after changing either toggle.
+Both overlay options are off by default. The plain cover thumbnails shown at the top of this page are what you get out of the box; turning the overlay on changes how every archive thumbnail looks:
+
+![The same Explorer folder with the identification overlay enabled: each archive has a format-coloured border and a corner label such as ZIP, RAR, or EPUB](assets/explorer_with_overlay.png)
+
+Because Explorer caches the rendered bitmap, a new overlay setting only takes effect once the cached thumbnails are rebuilt. Use **Regenerate thumbnails** after changing either toggle.
 
 Apply takes effect immediately. There is no service to restart.
 
