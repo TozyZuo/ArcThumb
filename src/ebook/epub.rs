@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 
@@ -102,7 +103,7 @@ fn attr_value(e: &BytesStart, reader: &Reader<&[u8]>, key: &[u8]) -> Option<Stri
         let attr_local = strip_namespace(attr_qname.as_ref());
         if attr_local == key {
             return attr
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .ok()
                 .map(|cow| cow.into_owned());
         }

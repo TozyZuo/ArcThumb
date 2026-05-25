@@ -43,6 +43,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::QName;
 use quick_xml::reader::Reader;
@@ -95,7 +96,7 @@ fn attr_value(e: &BytesStart, reader: &Reader<&[u8]>, key: &[u8]) -> Option<Stri
         let local = strip_namespace(qname.as_ref());
         if local == key {
             return attr
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .ok()
                 .map(|cow| cow.into_owned());
         }
