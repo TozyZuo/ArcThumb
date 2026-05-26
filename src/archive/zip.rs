@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 
+use super::ContentKind;
 use crate::settings::Settings;
 use crate::{ebook, limits};
 
@@ -40,7 +41,7 @@ fn try_extract_fb2_from_zip<R: Read + Seek>(
 pub(super) fn zip_read_first_image<R: Read + Seek>(
     mut reader: R,
     settings: &Settings,
-) -> Result<(String, Vec<u8>), Box<dyn Error>> {
+) -> Result<(String, Vec<u8>, ContentKind), Box<dyn Error>> {
     reader.seek(SeekFrom::Start(0))?;
     let mut archive = zip::ZipArchive::new(reader)?;
 
@@ -50,16 +51,16 @@ pub(super) fn zip_read_first_image<R: Read + Seek>(
     // through to the generic image scan so slightly malformed EPUBs
     // still produce a thumbnail. Non-EPUB ZIPs cost essentially
     // nothing here — `by_name` returns immediately when missing.
-    if let Some(result) = ebook::epub::try_extract_cover(&mut archive) {
-        return Ok(result);
+    if let Some((name, bytes)) = ebook::epub::try_extract_cover(&mut archive) {
+        return Ok((name, bytes, ContentKind::Epub));
     }
 
     // FB2.zip fast path: many FB2s are distributed wrapped in a ZIP
     // (the `.fb2.zip` convention). If we find an `.fb2` entry inside
     // the ZIP, route through the FB2 cover-extraction logic instead
     // of the generic image scan. Falls through on failure.
-    if let Some(result) = try_extract_fb2_from_zip(&mut archive) {
-        return Ok(result);
+    if let Some((name, bytes)) = try_extract_fb2_from_zip(&mut archive) {
+        return Ok((name, bytes, ContentKind::Fb2));
     }
 
     // Collect image candidates that also fit under the per-entry size
@@ -87,7 +88,7 @@ pub(super) fn zip_read_first_image<R: Read + Seek>(
     let mut buf = Vec::with_capacity(file.size() as usize);
     file.read_to_end(&mut buf)?;
 
-    Ok((name, buf))
+    Ok((name, buf, ContentKind::Zip))
 }
 
 #[cfg(test)]
@@ -228,6 +229,51 @@ mod tests {
         let zip = build_zip(&[("page1.jpg", b"data")]);
         let (name, _) = read_first_image(zip, &Settings::default()).expect("plain ZIP read");
         assert_eq!(name, "page1.jpg");
+    }
+
+    // ---------------------------------------------------------------
+    // ContentKind: the ZIP backend distinguishes plain ZIP / EPUB /
+    // FB2-in-ZIP by content even though they share the `PK` magic.
+    // This drives the identification overlay's colour and label.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plain_zip_reports_zip_kind() {
+        use super::super::{ContentKind, read_first_image_with_kind};
+        let zip = build_zip(&[("page1.jpg", b"data")]);
+        let e = read_first_image_with_kind(zip, &Settings::default()).expect("plain ZIP read");
+        assert_eq!(e.kind, ContentKind::Zip);
+    }
+
+    #[test]
+    fn epub_reports_epub_kind() {
+        use super::super::{ContentKind, read_first_image_with_kind};
+        let png = make_tiny_png();
+        let opf = r#"<?xml version="1.0"?>
+<package version="3.0" xmlns="http://www.idpf.org/2007/opf">
+  <metadata/>
+  <manifest>
+    <item id="cov" href="img/cover.png" media-type="image/png" properties="cover-image"/>
+  </manifest>
+</package>"#;
+        let epub = build_epub(
+            standard_container_xml(),
+            "OEBPS/content.opf",
+            opf,
+            &[("OEBPS/img/cover.png", &png)],
+        );
+        let e = read_first_image_with_kind(epub, &Settings::default()).expect("EPUB read");
+        assert_eq!(e.kind, ContentKind::Epub);
+    }
+
+    #[test]
+    fn fb2_in_zip_reports_fb2_kind() {
+        use super::super::{ContentKind, read_first_image_with_kind};
+        let png = make_tiny_png();
+        let fb2 = super::super::tests::build_fb2("c.png", &png);
+        let zip = build_zip(&[("book.fb2", &fb2)]);
+        let e = read_first_image_with_kind(zip, &Settings::default()).expect("fb2.zip read");
+        assert_eq!(e.kind, ContentKind::Fb2);
     }
 
     // ---------------------------------------------------------------

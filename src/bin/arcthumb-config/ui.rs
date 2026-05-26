@@ -177,6 +177,8 @@ fn apply_strings(window: &MainWindow, s: &Strings) {
     window.set_sort_alpha_label(SharedString::from(s.sort_alphabetical));
     window.set_prefer_cover_label(SharedString::from(s.cb_prefer_cover));
     window.set_enable_preview_label(SharedString::from(s.cb_enable_preview));
+    window.set_overlay_border_label(SharedString::from(s.cb_overlay_border));
+    window.set_overlay_label_label(SharedString::from(s.cb_overlay_label));
     window.set_btn_ok(SharedString::from(s.btn_ok));
     window.set_btn_cancel(SharedString::from(s.btn_cancel));
     window.set_btn_apply(SharedString::from(s.btn_apply));
@@ -190,6 +192,8 @@ fn push_model(window: &MainWindow, model: &UiModel) {
     window.set_sort_natural(matches!(model.settings.sort_order, SortOrder::Natural));
     window.set_prefer_cover(model.settings.prefer_cover_names);
     window.set_enable_preview(model.preview_enabled);
+    window.set_overlay_border(model.settings.overlay_border);
+    window.set_overlay_label(model.settings.overlay_label);
 }
 
 fn collect_from_ui(
@@ -207,6 +211,8 @@ fn collect_from_ui(
         sort_order,
         prefer_cover_names: window.get_prefer_cover(),
         enabled_image_exts_mask: image_mask,
+        overlay_border: window.get_overlay_border(),
+        overlay_label: window.get_overlay_label(),
     };
     (settings, ext_enabled, window.get_enable_preview())
 }
@@ -346,6 +352,31 @@ mod tests {
             assert_eq!(preview, original.preview_enabled, "preview round-trip");
         }
 
+        // ---- overlay toggles push then collect intact -----------
+        {
+            let window = MainWindow::new().expect("create MainWindow");
+            let settings = Settings {
+                overlay_border: true,
+                overlay_label: true,
+                ..Settings::default()
+            };
+            let model = UiModel {
+                image_ext_enabled: state::image_ext_mask_to_vec(settings.enabled_image_exts_mask),
+                settings,
+                scope: arcthumb::registry::Scope::PerUser,
+                ext_enabled: [true; EXT_COUNT],
+                preview_enabled: false,
+            };
+            let lists = ExtensionLists::from_model(&model);
+            window.set_extensions(lists.archive.as_model());
+            window.set_image_extensions(lists.image.as_model());
+
+            push_model(&window, &model);
+            let (collected, _, _) = collect_from_ui(&window, &lists);
+            assert!(collected.overlay_border, "border toggle round-trips");
+            assert!(collected.overlay_label, "label toggle round-trips");
+        }
+
         // ---- push_then_collect_round_trips_alphabetical_no_cover
         {
             let window = MainWindow::new().expect("create MainWindow");
@@ -424,6 +455,14 @@ mod tests {
             assert_eq!(
                 window.get_enable_preview_label(),
                 locale::EN.cb_enable_preview
+            );
+            assert_eq!(
+                window.get_overlay_border_label(),
+                locale::EN.cb_overlay_border
+            );
+            assert_eq!(
+                window.get_overlay_label_label(),
+                locale::EN.cb_overlay_label
             );
             assert_eq!(window.get_btn_ok(), locale::EN.btn_ok);
             assert_eq!(window.get_btn_cancel(), locale::EN.btn_cancel);

@@ -14,6 +14,7 @@ mod ebook;
 pub mod elevation;
 mod limits;
 mod log;
+mod overlay;
 mod preview;
 pub mod registry;
 pub mod settings;

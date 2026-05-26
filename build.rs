@@ -17,9 +17,14 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/main.slint");
 
     // On non-Windows targets this is a no-op so `cargo check` on
-    // other platforms still works.
+    // other platforms still works. The manifest is mandatory (it
+    // declares DPI awareness and Common Controls v6), so treat a
+    // missing RC compiler or a failed compile as a hard build error
+    // rather than silently shipping a binary without it.
     #[cfg(target_os = "windows")]
-    embed_resource::compile("resources/arcthumb-config.rc", embed_resource::NONE);
+    embed_resource::compile("resources/arcthumb-config.rc", embed_resource::NONE)
+        .manifest_required()
+        .expect("failed to embed Windows resource (manifest + icon)");
 
     // Compile the Slint UI for arcthumb-config. Generated Rust code
     // lands in OUT_DIR and is pulled in by `slint::include_modules!()`.

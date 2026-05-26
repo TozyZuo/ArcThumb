@@ -44,5 +44,11 @@ jobs:
       - name: Test (debug)
         run: cargo test
 
+      # The `jxl` feature is off by default, so the steps above never
+      # compile decode.rs's jxl-oxide path. Build and test it explicitly
+      # here, otherwise a breaking jxl-oxide bump passes CI unnoticed.
+      - name: Test (jxl feature)
+        run: cargo test --features jxl
+
       - name: Build (release)
         run: cargo build --release

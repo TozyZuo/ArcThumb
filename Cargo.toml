@@ -51,7 +51,7 @@ tar = "0.4"
 # Streaming XML parser used by the ebook backends (EPUB, FB2). Pure
 # Rust, no allocator surprises, used by widely-deployed crates like
 # `zip` and `sevenz-rust` already so it pulls no new dependencies.
-quick-xml = "0.39"
+quick-xml = "0.40"
 # Used by the FB2 backend to decode the base64-encoded images that
 # FictionBook embeds inline in the document. Pure Rust, ~25 KB.
 base64 = "0.22"
@@ -70,7 +70,13 @@ image = { version = "0.25", default-features = false, features = [
 # compiled. Only used for large-JPEG sources; other formats skip
 # this decoder entirely.
 jpeg-decoder = "0.3"
-jxl-oxide = { version = "0.11", features = ["image"], optional = true }
+jxl-oxide = { version = "0.12", features = ["image"], optional = true }
+# Pure-Rust glyph rasteriser for the identification-label overlay
+# baked into thumbnails. We embed a tiny A–Z/0–9 subset of Roboto
+# Bold (see assets/fonts/) so labels stay crisp at every Explorer
+# icon size. Only pulled onto the hot path when the label overlay is
+# enabled; it is off by default.
+ab_glyph = "0.2"
 # Slint is the GUI toolkit for the `arcthumb-config` binary. Strings
 # are passed from Rust to the Slint UI via properties for now; the
 # language is picked at startup from the registry override and OS
@@ -98,7 +104,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # links against Common Controls v6. Without this, nwg fails to
 # resolve `GetWindowSubclass` at process start and the exe won't
 # launch. Applies to both the DLL and the exe; the DLL ignores it.
-embed-resource = "2"
+embed-resource = "3"
 # Compiles `.slint` UI files into Rust code that the binary pulls in
 # via `slint::include_modules!()`. Keep the version in sync with the
 # `slint` runtime crate above.
