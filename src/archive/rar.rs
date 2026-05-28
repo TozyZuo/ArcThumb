@@ -285,7 +285,7 @@ mod tests {
             let rar = build_minimal_rar4(&entry, &png);
             let settings = Settings {
                 enabled_image_exts_mask: 1u32 << i,
-                prefer_cover_names: false,
+                cover_mode: crate::settings::CoverMode::Ignore,
                 ..Settings::default()
             };
             let (name, _) = read_first_image(Cursor::new(rar), &settings)

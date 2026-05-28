@@ -175,7 +175,11 @@ fn apply_strings(window: &MainWindow, s: &Strings) {
     window.set_group_sort(SharedString::from(s.group_sort));
     window.set_sort_natural_label(SharedString::from(s.sort_natural));
     window.set_sort_alpha_label(SharedString::from(s.sort_alphabetical));
-    window.set_prefer_cover_label(SharedString::from(s.cb_prefer_cover));
+    window.set_group_cover(SharedString::from(s.group_cover));
+    window.set_cover_prefer_label(SharedString::from(s.cover_prefer));
+    window.set_cover_only_label(SharedString::from(s.cover_only));
+    window.set_cover_ignore_label(SharedString::from(s.cover_ignore));
+    window.set_group_other(SharedString::from(s.group_other));
     window.set_enable_preview_label(SharedString::from(s.cb_enable_preview));
     window.set_overlay_border_label(SharedString::from(s.cb_overlay_border));
     window.set_overlay_label_label(SharedString::from(s.cb_overlay_label));
@@ -190,7 +194,7 @@ fn apply_strings(window: &MainWindow, s: &Strings) {
 /// because they live in a `VecModel` rather than scalar properties.
 fn push_model(window: &MainWindow, model: &UiModel) {
     window.set_sort_natural(matches!(model.settings.sort_order, SortOrder::Natural));
-    window.set_prefer_cover(model.settings.prefer_cover_names);
+    window.set_cover_mode(state::cover_mode_to_index(model.settings.cover_mode));
     window.set_enable_preview(model.preview_enabled);
     window.set_overlay_border(model.settings.overlay_border);
     window.set_overlay_label(model.settings.overlay_label);
@@ -209,7 +213,7 @@ fn collect_from_ui(
     let image_mask = state::image_ext_vec_to_mask(&lists.image.enabled_vec());
     let settings = Settings {
         sort_order,
-        prefer_cover_names: window.get_prefer_cover(),
+        cover_mode: state::cover_mode_from_index(window.get_cover_mode()),
         enabled_image_exts_mask: image_mask,
         overlay_border: window.get_overlay_border(),
         overlay_label: window.get_overlay_label(),
@@ -314,7 +318,7 @@ mod tests {
     //! default parallel test runner.
 
     use super::*;
-    use arcthumb::settings::SortOrder;
+    use arcthumb::settings::{CoverMode, SortOrder};
 
     fn baseline_model() -> UiModel {
         let mut ext = [false; EXT_COUNT];
@@ -382,7 +386,7 @@ mod tests {
             let window = MainWindow::new().expect("create MainWindow");
             let settings = Settings {
                 sort_order: SortOrder::Alphabetical,
-                prefer_cover_names: false,
+                cover_mode: CoverMode::Ignore,
                 ..Settings::default()
             };
             let model = UiModel {
@@ -400,9 +404,35 @@ mod tests {
             let (settings, ext_enabled, preview) = collect_from_ui(&window, &lists);
 
             assert_eq!(settings.sort_order, SortOrder::Alphabetical);
-            assert!(!settings.prefer_cover_names);
+            assert_eq!(settings.cover_mode, CoverMode::Ignore);
             assert_eq!(ext_enabled, [true; EXT_COUNT]);
             assert!(!preview);
+        }
+
+        // ---- cover_mode dropdown round-trips every CoverMode -------
+        {
+            for mode in [CoverMode::Prefer, CoverMode::Only, CoverMode::Ignore] {
+                let window = MainWindow::new().expect("create MainWindow");
+                let settings = Settings {
+                    cover_mode: mode,
+                    ..Settings::default()
+                };
+                let model = UiModel {
+                    image_ext_enabled: state::image_ext_mask_to_vec(
+                        settings.enabled_image_exts_mask,
+                    ),
+                    settings,
+                    scope: arcthumb::registry::Scope::PerUser,
+                    ext_enabled: [true; EXT_COUNT],
+                    preview_enabled: false,
+                };
+                let lists = ExtensionLists::from_model(&model);
+                window.set_extensions(lists.archive.as_model());
+                window.set_image_extensions(lists.image.as_model());
+                push_model(&window, &model);
+                let (collected, _, _) = collect_from_ui(&window, &lists);
+                assert_eq!(collected.cover_mode, mode, "cover_mode round-trip {mode:?}");
+            }
         }
 
         // ---- toggle_extension_callback_path_via_extension_model
@@ -451,7 +481,11 @@ mod tests {
             assert_eq!(window.get_group_sort(), locale::EN.group_sort);
             assert_eq!(window.get_sort_natural_label(), locale::EN.sort_natural);
             assert_eq!(window.get_sort_alpha_label(), locale::EN.sort_alphabetical);
-            assert_eq!(window.get_prefer_cover_label(), locale::EN.cb_prefer_cover);
+            assert_eq!(window.get_group_cover(), locale::EN.group_cover);
+            assert_eq!(window.get_cover_prefer_label(), locale::EN.cover_prefer);
+            assert_eq!(window.get_cover_only_label(), locale::EN.cover_only);
+            assert_eq!(window.get_cover_ignore_label(), locale::EN.cover_ignore);
+            assert_eq!(window.get_group_other(), locale::EN.group_other);
             assert_eq!(
                 window.get_enable_preview_label(),
                 locale::EN.cb_enable_preview

@@ -245,7 +245,7 @@ pub fn apply_plan(plan: &[ApplyAction], ops: &dyn RegistryOps) -> ApplyOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arcthumb::settings::SortOrder;
+    use arcthumb::settings::{CoverMode, SortOrder};
     use std::cell::RefCell;
 
     fn baseline_model() -> UiModel {
@@ -257,7 +257,7 @@ mod tests {
         ext[1] = true; // .cbz
         let settings = Settings {
             sort_order: SortOrder::Natural,
-            prefer_cover_names: true,
+            cover_mode: CoverMode::Prefer,
             ..Settings::default()
         };
         UiModel {
@@ -290,7 +290,7 @@ mod tests {
         let model = baseline_model();
         let new_settings = Settings {
             sort_order: SortOrder::Alphabetical,
-            prefer_cover_names: true,
+            cover_mode: CoverMode::Prefer,
             ..model.settings
         };
         let plan = compute_apply_plan(&model, new_settings, model.ext_enabled, false);
@@ -302,7 +302,7 @@ mod tests {
         let model = baseline_model();
         let new_settings = Settings {
             sort_order: model.settings.sort_order,
-            prefer_cover_names: !model.settings.prefer_cover_names,
+            cover_mode: CoverMode::Only,
             ..model.settings
         };
         let plan = compute_apply_plan(&model, new_settings, model.ext_enabled, false);
@@ -375,7 +375,7 @@ mod tests {
         let model = baseline_model();
         let new_settings = Settings {
             sort_order: SortOrder::Alphabetical,
-            prefer_cover_names: false,
+            cover_mode: CoverMode::Ignore,
             ..model.settings
         };
         let mut new_ext = model.ext_enabled;
