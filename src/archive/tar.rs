@@ -122,7 +122,7 @@ mod tests {
         let tar = build_tar(&[("a.jpg", b"JPG"), ("b.png", b"PNG")]);
         let settings = Settings {
             enabled_image_exts_mask: !(1u32 << jpg_idx) & default_enabled_image_exts_mask(),
-            prefer_cover_names: false,
+            cover_mode: crate::settings::CoverMode::Ignore,
             ..Settings::default()
         };
         let (name, _) = read_first_image(tar, &settings).expect("mask excludes jpg");
@@ -150,7 +150,7 @@ mod tests {
             let tar = build_tar(&[(&entry, b"BODY")]);
             let settings = Settings {
                 enabled_image_exts_mask: 1u32 << i,
-                prefer_cover_names: false,
+                cover_mode: crate::settings::CoverMode::Ignore,
                 ..Settings::default()
             };
             let (name, _) = read_first_image(tar, &settings)

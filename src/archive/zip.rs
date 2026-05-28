@@ -463,7 +463,7 @@ mod tests {
         let settings = Settings {
             enabled_image_exts_mask: !(1u32 << jpg_idx)
                 & crate::settings::default_enabled_image_exts_mask(),
-            prefer_cover_names: false,
+            cover_mode: crate::settings::CoverMode::Ignore,
             ..Settings::default()
         };
         let (name, _) = read_first_image(zip, &settings).expect("jpg disabled");
@@ -478,7 +478,7 @@ mod tests {
         let settings = Settings {
             enabled_image_exts_mask: !(1u32 << png_idx)
                 & crate::settings::default_enabled_image_exts_mask(),
-            prefer_cover_names: false,
+            cover_mode: crate::settings::CoverMode::Ignore,
             ..Settings::default()
         };
         let (name, _) = read_first_image(zip, &settings).expect("png disabled");
@@ -512,7 +512,7 @@ mod tests {
             let zip = build_zip(&[(&entry, &body)]);
             let settings = Settings {
                 enabled_image_exts_mask: 1u32 << i,
-                prefer_cover_names: false,
+                cover_mode: crate::settings::CoverMode::Ignore,
                 ..Settings::default()
             };
             let (name, _) = read_first_image(zip, &settings)
