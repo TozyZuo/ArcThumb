@@ -23,6 +23,7 @@ import {
     ComboBox,
     GroupBox,
     HorizontalBox,
+    ScrollView,
     VerticalBox,
 } from "std-widgets.slint";
 
@@ -39,13 +40,13 @@ export component MainWindow inherits Window {
     title: root.window_title;
     icon: @image-url("../assets/icon.png");
     preferred-width: 520px;
-    // Tuned so the bottom-row buttons sit a comfortable 12-16 px
-    // below the last checkbox at default size. Larger windows grow
-    // that gap because the spacer Rectangle below has
-    // `vertical-stretch: 1`; the floor is set by `min-height`.
+    // Default size fits every section without scrolling. If the user
+    // shrinks the window below what the content needs, the ScrollView
+    // around the body engages so the footer buttons stay reachable —
+    // that's why `min-height` is much smaller than `preferred-height`.
     preferred-height: 600px;
     min-width: 500px;
-    min-height: 580px;
+    min-height: 320px;
 
     // ---- Localized labels (set from Rust at startup) -------------
     in property <string> window_title;
@@ -58,7 +59,11 @@ export component MainWindow inherits Window {
     in property <string> group_sort;
     in property <string> sort_natural_label;
     in property <string> sort_alpha_label;
-    in property <string> prefer_cover_label;
+    in property <string> group_cover;
+    in property <string> cover_prefer_label;
+    in property <string> cover_only_label;
+    in property <string> cover_ignore_label;
+    in property <string> group_other;
     in property <string> enable_preview_label;
     in property <string> overlay_border_label;
     in property <string> overlay_label_label;
@@ -76,7 +81,10 @@ export component MainWindow inherits Window {
     // Parallel to `arcthumb::settings::SUPPORTED_IMAGE_EXTS`.
     in property <[ExtensionEntry]> image_extensions;
     in-out property <bool> sort_natural;
-    in-out property <bool> prefer_cover;
+    // Cover-name handling, as an index into the dropdown:
+    // 0 = prefer, 1 = only, 2 = ignore. Mapped to `CoverMode` on the
+    // Rust side (`state::cover_mode_{to,from}_index`).
+    in-out property <int> cover_mode;
     in-out property <bool> enable_preview;
     in-out property <bool> overlay_border;
     in-out property <bool> overlay_label;
@@ -114,100 +122,126 @@ export component MainWindow inherits Window {
 
     // Layout note (resize behaviour):
     //
-    // `VerticalBox` distributes leftover height to children with
-    // `vertical-stretch > 0`. By default *every* child gets some,
-    // which made the GroupBox internals balloon and the ComboBox
-    // grow taller as the window resized. We pin every content
-    // widget to `vertical-stretch: 0` so they keep their natural
-    // height, and put a single stretchy spacer just above the
-    // button row to absorb all extra vertical space. The result:
-    // section internals stay tight, the gap between content and
-    // the footer is the only thing that grows on resize.
+    // The body is wrapped in a `ScrollView` so the footer button row
+    // (OK / Cancel / Apply / Regenerate) is always reachable even when
+    // the user shrinks the window below the content's natural height.
+    // The ScrollView takes all leftover vertical space (`vertical-stretch: 1`)
+    // and engages a scrollbar only when needed. Every content widget
+    // stays `vertical-stretch: 0` so sections keep their natural height
+    // — at sizes larger than the content needs, the empty space sits
+    // inside the ScrollView's viewport below the last section, the same
+    // place the old stretchy spacer used to put it.
     VerticalBox {
-        padding: 14px;
-        spacing: 12px;
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 0px;
+        padding-bottom: 10px;
+        spacing: 0px;
 
-        GroupBox {
-            vertical-stretch: 0;
-            title: root.group_extensions;
-            // 4 columns wide, row-major. We compute the row/col
-            // from the iteration index `i` so the layout follows
-            // `arcthumb::registry::EXTENSIONS` order automatically.
-            // `Math.floor` and `Math.mod` are needed because Slint
-            // returns a float from `int / int`.
-            GridLayout {
-                spacing: 6px;
-                for entry[i] in root.extensions: CheckBox {
-                    row: Math.floor(i / 4);
-                    col: Math.mod(i, 4);
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 0px;
+
+                GroupBox {
                     vertical-stretch: 0;
-                    text: entry.name;
-                    checked: entry.enabled;
-                    toggled => {
-                        root.toggle_extension(i);
+                    title: root.group_extensions;
+                    // 6 columns wide, row-major. We compute the row/col
+                    // from the iteration index `i` so the layout follows
+                    // `arcthumb::registry::EXTENSIONS` order automatically.
+                    // `Math.floor` and `Math.mod` are needed because Slint
+                    // returns a float from `int / int`.
+                    GridLayout {
+                        spacing: 8px;
+                        for entry[i] in root.extensions: CheckBox {
+                            row: Math.floor(i / 6);
+                            col: Math.mod(i, 6);
+                            vertical-stretch: 0;
+                            text: entry.name;
+                            checked: entry.enabled;
+                            toggled => {
+                                root.toggle_extension(i);
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        GroupBox {
-            vertical-stretch: 0;
-            title: root.group_image_exts;
-            GridLayout {
-                spacing: 6px;
-                for entry[i] in root.image_extensions: CheckBox {
-                    row: Math.floor(i / 4);
-                    col: Math.mod(i, 4);
+                GroupBox {
                     vertical-stretch: 0;
-                    text: entry.name;
-                    checked: entry.enabled;
-                    toggled => {
-                        root.toggle_image_extension(i);
+                    title: root.group_image_exts;
+                    GridLayout {
+                        spacing: 8px;
+                        for entry[i] in root.image_extensions: CheckBox {
+                            row: Math.floor(i / 6);
+                            col: Math.mod(i, 6);
+                            vertical-stretch: 0;
+                            text: entry.name;
+                            checked: entry.enabled;
+                            toggled => {
+                                root.toggle_image_extension(i);
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        GroupBox {
-            vertical-stretch: 0;
-            title: root.group_sort;
-            ComboBox {
-                vertical-stretch: 0;
-                model: [root.sort_natural_label, root.sort_alpha_label];
-                current-index: root.sort_natural ? 0 : 1;
-                selected(current) => {
-                    root.sort_natural = self.current-index == 0;
+                GroupBox {
+                    vertical-stretch: 0;
+                    title: root.group_sort;
+                    ComboBox {
+                        vertical-stretch: 0;
+                        model: [root.sort_natural_label, root.sort_alpha_label];
+                        current-index: root.sort_natural ? 0 : 1;
+                        selected(current) => {
+                            root.sort_natural = self.current-index == 0;
+                        }
+                    }
                 }
+
+                GroupBox {
+                    vertical-stretch: 0;
+                    title: root.group_cover;
+                    ComboBox {
+                        vertical-stretch: 0;
+                        model: [
+                            root.cover_prefer_label,
+                            root.cover_only_label,
+                            root.cover_ignore_label,
+                        ];
+                        current-index: root.cover_mode;
+                        selected(current) => {
+                            root.cover_mode = self.current-index;
+                        }
+                    }
+                }
+
+                GroupBox {
+                    vertical-stretch: 0;
+                    title: root.group_other;
+                    VerticalLayout {
+                        spacing: 6px;
+                        CheckBox {
+                            vertical-stretch: 0;
+                            text: root.enable_preview_label;
+                            checked <=> root.enable_preview;
+                        }
+                        CheckBox {
+                            vertical-stretch: 0;
+                            text: root.overlay_border_label;
+                            checked <=> root.overlay_border;
+                        }
+                        CheckBox {
+                            vertical-stretch: 0;
+                            text: root.overlay_label_label;
+                            checked <=> root.overlay_label;
+                        }
+                    }
+                }
+
+                // Soak up extra height so the GroupBoxes and ComboBoxes
+                // above don't stretch when the window is resized taller.
+                Rectangle { vertical-stretch: 1; }
             }
         }
-
-        CheckBox {
-            vertical-stretch: 0;
-            text: root.prefer_cover_label;
-            checked <=> root.prefer_cover;
-        }
-
-        CheckBox {
-            vertical-stretch: 0;
-            text: root.enable_preview_label;
-            checked <=> root.enable_preview;
-        }
-
-        CheckBox {
-            vertical-stretch: 0;
-            text: root.overlay_border_label;
-            checked <=> root.overlay_border;
-        }
-
-        CheckBox {
-            vertical-stretch: 0;
-            text: root.overlay_label_label;
-            checked <=> root.overlay_label;
-        }
-
-        // The only stretchy element. Absorbs all extra height when
-        // the window is resized so nothing above grows internally.
-        Rectangle { vertical-stretch: 1; }
 
         HorizontalBox {
             vertical-stretch: 0;
@@ -375,4 +409,66 @@ export component DonationDialog inherits Window {
             }
         }
     }
+}
+
+// Preview-only wrapper. The production `MainWindow` receives every
+// `in property <string>` from Rust at startup; VS Code's Slint preview
+// and `slint-viewer` have no Rust side, so they render those properties
+// as empty strings and the toggle lists as empty arrays. This component
+// inherits `MainWindow` and assigns plausible Japanese defaults so the
+// preview shows a realistic layout. Not used by the binary — Rust still
+// instantiates `MainWindow` directly, and these defaults are overridden
+// the moment `set_*` is called at startup.
+export component MainWindowPreview inherits MainWindow {
+    window_title: "ArcThumb 設定";
+    menu_file: "ファイル";
+    menu_file_exit: "終了";
+    menu_help: "ヘルプ";
+    menu_help_about: "ArcThumb について";
+    group_extensions: "有効にする拡張子";
+    group_image_exts: "サムネイルに使う画像形式 (アーカイブ内)";
+    group_sort: "並び順";
+    sort_natural_label: "自然順 (page2 < page10)";
+    sort_alpha_label: "アルファベット順";
+    group_cover: "カバー画像 (cover / folder / thumb / thumbnail / front)";
+    cover_prefer_label: "カバーを優先（無ければ先頭ページ）";
+    cover_only_label: "カバーがあるときだけ表示（無ければ通常アイコン）";
+    cover_ignore_label: "常に先頭ページを使う";
+    group_other: "その他の設定";
+    enable_preview_label: "プレビュー ウィンドウを有効にする (Alt+P)";
+    overlay_border_label: "アーカイブを色付きの枠線で示す";
+    overlay_label_label: "アーカイブにフォーマットラベルを表示 (CBZ, EPUB, ...)";
+    btn_ok: "OK";
+    btn_cancel: "キャンセル";
+    btn_apply: "適用";
+    btn_regenerate: "サムネイルを再生成";
+
+    // Dummy toggle rows so the grids actually render. Lengths roughly
+    // match the real `registry::EXTENSIONS` and `SUPPORTED_IMAGE_EXTS`
+    // so the preview shows the same number of rows as production.
+    extensions: [
+        { name: ".zip",  enabled: true  },
+        { name: ".cbz",  enabled: true  },
+        { name: ".rar",  enabled: true  },
+        { name: ".cbr",  enabled: false },
+        { name: ".7z",   enabled: true  },
+        { name: ".cb7",  enabled: false },
+        { name: ".tar",  enabled: false },
+        { name: ".epub", enabled: true  },
+        { name: ".fb2",  enabled: false },
+        { name: ".mobi", enabled: false },
+        { name: ".azw",  enabled: false },
+        { name: ".azw3", enabled: false },
+    ];
+    image_extensions: [
+        { name: ".jpg",  enabled: true  },
+        { name: ".jpeg", enabled: true  },
+        { name: ".png",  enabled: true  },
+        { name: ".gif",  enabled: true  },
+        { name: ".bmp",  enabled: true  },
+        { name: ".tiff", enabled: true  },
+        { name: ".tif",  enabled: true  },
+        { name: ".webp", enabled: true  },
+        { name: ".ico",  enabled: true  },
+    ];
 }

@@ -135,7 +135,7 @@ mod tests {
         let sz = build_7z(&[("a.jpg", &png), ("b.png", &png)]);
         let settings = Settings {
             enabled_image_exts_mask: !(1u32 << jpg_idx) & default_enabled_image_exts_mask(),
-            prefer_cover_names: false,
+            cover_mode: crate::settings::CoverMode::Ignore,
             ..Settings::default()
         };
         let (name, _) = read_first_image(sz, &settings).expect("mask excludes jpg");
@@ -165,7 +165,7 @@ mod tests {
             let sz = build_7z(&[(&entry, &png)]);
             let settings = Settings {
                 enabled_image_exts_mask: 1u32 << i,
-                prefer_cover_names: false,
+                cover_mode: crate::settings::CoverMode::Ignore,
                 ..Settings::default()
             };
             let (name, _) = read_first_image(sz, &settings)

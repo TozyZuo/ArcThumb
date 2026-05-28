@@ -9,7 +9,7 @@
 //! ```text
 //! HKEY_CURRENT_USER\Software\ArcThumb
 //!     SortOrder         REG_SZ    "natural" | "alphabetical"
-//!     PreferCoverNames  REG_DWORD 0 | 1
+//!     CoverMode         REG_SZ    "ignore" | "prefer" | "only"
 //!     EnabledImageExts  REG_DWORD bitmask over SUPPORTED_IMAGE_EXTS
 //!     OverlayBorder     REG_DWORD 0 | 1
 //!     OverlayLabel      REG_DWORD 0 | 1
@@ -55,6 +55,47 @@ impl SortOrder {
     }
 }
 
+/// How cover-named images (`cover.*`, `folder.*`, `thumb.*`,
+/// `thumbnail.*`, `front.*`) are treated when picking the thumbnail
+/// source inside an archive. Names match case-insensitively and must
+/// equal one of those stems exactly (`cover.png` qualifies,
+/// `coverpage.png` does not).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CoverMode {
+    /// Ignore cover names entirely: always take the first image by
+    /// sort order.
+    Ignore,
+    /// Prefer a cover-named image when present, otherwise fall back to
+    /// the first image by sort order. The default.
+    #[default]
+    Prefer,
+    /// Use a cover-named image only. When the archive has none, produce
+    /// no thumbnail at all so Explorer shows the plain archive icon —
+    /// this keeps incidental images inside unrelated archives (a stray
+    /// screenshot in a work ZIP) from becoming the thumbnail.
+    Only,
+}
+
+impl CoverMode {
+    fn from_registry_value(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "ignore" => Some(Self::Ignore),
+            "prefer" => Some(Self::Prefer),
+            "only" => Some(Self::Only),
+            _ => None,
+        }
+    }
+
+    /// Canonical registry string form. Paired with `from_registry_value`.
+    pub fn as_registry_value(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Prefer => "prefer",
+            Self::Only => "only",
+        }
+    }
+}
+
 /// Image extensions ArcThumb can decode when extracted from an
 /// archive. This is the fixed compile-time *supported set*; the
 /// user-facing `Settings::enabled_image_exts_mask` picks a subset.
@@ -84,10 +125,10 @@ pub const fn default_enabled_image_exts_mask() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     pub sort_order: SortOrder,
-    /// When true, files named `cover.*`, `folder.*`, `thumb.*`,
-    /// `thumbnail.*`, or `front.*` are preferred over the first
-    /// image by sort order.
-    pub prefer_cover_names: bool,
+    /// How cover-named images (`cover.*`, `folder.*`, `thumb.*`,
+    /// `thumbnail.*`, `front.*`) are treated when picking the
+    /// thumbnail source. See [`CoverMode`].
+    pub cover_mode: CoverMode,
     /// Bitmask over `SUPPORTED_IMAGE_EXTS`: bit `i` set = extension
     /// at index `i` is eligible as a thumbnail source inside
     /// archives. Only bits < `SUPPORTED_IMAGE_EXTS.len()` are
@@ -111,7 +152,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             sort_order: SortOrder::Natural,
-            prefer_cover_names: true,
+            cover_mode: CoverMode::Prefer,
             enabled_image_exts_mask: default_enabled_image_exts_mask(),
             overlay_border: false,
             overlay_label: false,
@@ -145,8 +186,19 @@ impl Settings {
         {
             out.sort_order = order;
         }
-        if let Ok(v) = key.get_value::<u32, _>("PreferCoverNames") {
-            out.prefer_cover_names = v != 0;
+        // CoverMode (REG_SZ) is the current key. Older builds wrote
+        // PreferCoverNames (REG_DWORD); read it as a fallback so an
+        // existing install keeps its choice (1 -> Prefer, 0 -> Ignore).
+        if let Ok(s) = key.get_value::<String, _>("CoverMode")
+            && let Some(mode) = CoverMode::from_registry_value(&s)
+        {
+            out.cover_mode = mode;
+        } else if let Ok(v) = key.get_value::<u32, _>("PreferCoverNames") {
+            out.cover_mode = if v != 0 {
+                CoverMode::Prefer
+            } else {
+                CoverMode::Ignore
+            };
         }
         if let Ok(v) = key.get_value::<u32, _>("EnabledImageExts") {
             // Mask unused high bits so a stale value from a build
@@ -186,7 +238,11 @@ impl Settings {
 
     /// Pick the "best" image name from a list of candidates according
     /// to this settings snapshot. Applies `sort_order` and
-    /// `prefer_cover_names`.
+    /// `cover_mode`.
+    ///
+    /// In [`CoverMode::Only`] a list with no cover-named image yields
+    /// `None`, which the archive backends turn into a "no image" error
+    /// and ultimately a default Explorer icon.
     pub fn pick_first_image(&self, mut names: Vec<String>) -> Option<String> {
         if names.is_empty() {
             return None;
@@ -195,20 +251,22 @@ impl Settings {
             SortOrder::Alphabetical => names.sort(),
             SortOrder::Natural => names.sort_by(|a, b| natural_cmp(a, b)),
         }
-        if self.prefer_cover_names
-            && let Some(cover) = names.iter().find(|n| is_cover_name(n))
-        {
-            return Some(cover.clone());
+        match self.cover_mode {
+            CoverMode::Ignore => names.into_iter().next(),
+            CoverMode::Prefer => names
+                .iter()
+                .find(|n| is_cover_name(n))
+                .cloned()
+                .or_else(|| names.into_iter().next()),
+            CoverMode::Only => names.into_iter().find(|n| is_cover_name(n)),
         }
-        names.into_iter().next()
     }
 
     fn save_to_subkey(&self, subkey: &str) -> std::io::Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let (key, _) = hkcu.create_subkey(subkey)?;
         key.set_value("SortOrder", &self.sort_order.as_registry_value())?;
-        let flag: u32 = if self.prefer_cover_names { 1 } else { 0 };
-        key.set_value("PreferCoverNames", &flag)?;
+        key.set_value("CoverMode", &self.cover_mode.as_registry_value())?;
         let mask = self.enabled_image_exts_mask & default_enabled_image_exts_mask();
         key.set_value("EnabledImageExts", &mask)?;
         let border: u32 = if self.overlay_border { 1 } else { 0 };
@@ -438,6 +496,121 @@ mod tests {
     }
 
     #[test]
+    fn pick_first_image_only_mode_picks_cover_or_nothing() {
+        let only = Settings {
+            cover_mode: CoverMode::Only,
+            ..Settings::default()
+        };
+        // Cover present: it wins over the page scan.
+        let with_cover = vec![
+            "page01.jpg".to_string(),
+            "cover.jpg".to_string(),
+            "page02.jpg".to_string(),
+        ];
+        assert_eq!(
+            only.pick_first_image(with_cover),
+            Some("cover.jpg".to_string())
+        );
+        // No cover: None, which the backends turn into a "no image"
+        // error so Explorer shows the plain archive icon.
+        let no_cover = vec!["page01.jpg".to_string(), "page02.jpg".to_string()];
+        assert_eq!(only.pick_first_image(no_cover), None);
+    }
+
+    #[test]
+    fn pick_first_image_only_mode_honours_all_aliases() {
+        let only = Settings {
+            cover_mode: CoverMode::Only,
+            ..Settings::default()
+        };
+        for stem in &["cover", "folder", "thumb", "thumbnail", "front"] {
+            let names = vec!["page01.jpg".to_string(), format!("{stem}.jpg")];
+            assert_eq!(
+                only.pick_first_image(names),
+                Some(format!("{stem}.jpg")),
+                "only mode should accept the {stem} alias"
+            );
+        }
+    }
+
+    #[test]
+    fn pick_first_image_ignore_mode_skips_cover() {
+        // `aaa` sorts before the `thumbnail` cover stem, so a mode that
+        // honoured cover names would still return the cover. Ignore must
+        // give it no special treatment and return the sort-order first.
+        let names = vec!["thumbnail.jpg".to_string(), "aaa.jpg".to_string()];
+        let ignore = Settings {
+            cover_mode: CoverMode::Ignore,
+            ..Settings::default()
+        };
+        assert_eq!(
+            ignore.pick_first_image(names.clone()),
+            Some("aaa.jpg".to_string())
+        );
+        // Sanity: the default Prefer mode would pick the cover instead,
+        // proving the difference is the mode and not the sort order.
+        let prefer = Settings::default();
+        assert_eq!(
+            prefer.pick_first_image(names),
+            Some("thumbnail.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn cover_mode_parse_round_trip() {
+        for mode in [CoverMode::Ignore, CoverMode::Prefer, CoverMode::Only] {
+            let s = mode.as_registry_value();
+            assert_eq!(CoverMode::from_registry_value(s), Some(mode));
+        }
+        // Case-insensitive parse; unknown strings fall through.
+        assert_eq!(
+            CoverMode::from_registry_value("ONLY"),
+            Some(CoverMode::Only)
+        );
+        assert_eq!(CoverMode::from_registry_value("garbage"), None);
+    }
+
+    #[test]
+    fn cover_mode_registry_round_trip_all_values() {
+        for mode in [CoverMode::Ignore, CoverMode::Prefer, CoverMode::Only] {
+            let scratch = ScratchSubkey::new("covermode");
+            let original = Settings {
+                cover_mode: mode,
+                ..Settings::default()
+            };
+            original.save_to_subkey(scratch.path()).unwrap();
+            let loaded = Settings::load_from_subkey(scratch.path());
+            assert_eq!(loaded.cover_mode, mode, "round-trip {mode:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_prefer_cover_names_falls_back() {
+        // Older builds wrote PreferCoverNames (REG_DWORD) and no
+        // CoverMode key. Loading must honour it: 1 -> Prefer, 0 -> Ignore.
+        for (dword, expected) in [(1u32, CoverMode::Prefer), (0u32, CoverMode::Ignore)] {
+            let scratch = ScratchSubkey::new("legacycover");
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let (key, _) = hkcu.create_subkey(scratch.path()).unwrap();
+            key.set_value("PreferCoverNames", &dword).unwrap();
+            let loaded = Settings::load_from_subkey(scratch.path());
+            assert_eq!(loaded.cover_mode, expected, "PreferCoverNames={dword}");
+        }
+    }
+
+    #[test]
+    fn cover_mode_takes_precedence_over_legacy_key() {
+        // When both keys exist (an upgrade that re-saved), CoverMode wins.
+        let scratch = ScratchSubkey::new("coverboth");
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(scratch.path()).unwrap();
+        key.set_value("PreferCoverNames", &0u32).unwrap(); // legacy -> Ignore
+        key.set_value("CoverMode", &"only").unwrap();
+        let loaded = Settings::load_from_subkey(scratch.path());
+        assert_eq!(loaded.cover_mode, CoverMode::Only);
+    }
+
+    #[test]
     fn sort_order_parse_aliases() {
         assert_eq!(
             SortOrder::from_registry_value("alphabetical"),
@@ -474,7 +647,7 @@ mod tests {
         // every fresh install.
         let s = Settings::default();
         assert_eq!(s.sort_order, SortOrder::Natural);
-        assert!(s.prefer_cover_names);
+        assert_eq!(s.cover_mode, CoverMode::Prefer);
         assert_eq!(
             s.enabled_image_exts_mask,
             default_enabled_image_exts_mask(),
@@ -520,7 +693,7 @@ mod tests {
         let scratch = ScratchSubkey::new("roundtrip");
         let original = Settings {
             sort_order: SortOrder::Alphabetical,
-            prefer_cover_names: false,
+            cover_mode: CoverMode::Only,
             enabled_image_exts_mask: 0b1010_1010,
             overlay_border: true,
             overlay_label: true,
@@ -533,7 +706,7 @@ mod tests {
         // against the AND-ed form.
         let expected_mask = 0b1010_1010 & default_enabled_image_exts_mask();
         assert_eq!(loaded.sort_order, SortOrder::Alphabetical);
-        assert!(!loaded.prefer_cover_names);
+        assert_eq!(loaded.cover_mode, CoverMode::Only);
         assert_eq!(loaded.enabled_image_exts_mask, expected_mask);
         assert!(loaded.overlay_border, "border overlay round-trips");
         assert!(loaded.overlay_label, "label overlay round-trips");
