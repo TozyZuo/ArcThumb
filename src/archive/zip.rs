@@ -45,6 +45,20 @@ pub(super) fn zip_read_first_image<R: Read + Seek>(
     reader.seek(SeekFrom::Start(0))?;
     let mut archive = zip::ZipArchive::new(reader)?;
 
+    // Entry-count guard. `ZipArchive::new` has already populated its
+    // internal list from the central directory, so a hostile archive
+    // claiming billions of entries would have already caused trouble
+    // by this point — but `len()` is still useful as a backstop and
+    // bounds the work the downstream candidate loop will do.
+    if archive.len() > limits::MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "archive has too many entries ({} > {} limit)",
+            archive.len(),
+            limits::MAX_ARCHIVE_ENTRIES
+        )
+        .into());
+    }
+
     // EPUB fast path: if the archive carries `META-INF/container.xml`,
     // we can pull the cover from the OPF metadata directly. On any
     // failure (broken XML, missing manifest entry, etc.) we fall
@@ -526,5 +540,56 @@ mod tests {
         let zip = build_zip(&[("page01.jpg", b"AAA"), ("page02.jpg", b"BBB")]);
         let (name, _) = read_first_image(zip, &Settings::default()).expect("plain ZIP read");
         assert_eq!(name, "page01.jpg");
+    }
+
+    // ---------------------------------------------------------------
+    // Entry-count cap (`limits::MAX_ARCHIVE_ENTRIES`).
+    // ---------------------------------------------------------------
+
+    /// Builds a ZIP with `n` zero-byte non-image entries plus one
+    /// trailing PNG, all stored (no compression). Used to drive the
+    /// entry-count cap test without building a heavy archive.
+    fn build_zip_with_n_dummies(n: usize) -> Cursor<Vec<u8>> {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for i in 0..n {
+                let name = format!("f{i:07}.bin");
+                w.start_file(&name, opts).unwrap();
+                // empty body — keeps the archive tiny
+            }
+            w.start_file("cover.png", opts).unwrap();
+            std::io::Write::write_all(&mut w, &make_tiny_png()).unwrap();
+            w.finish().unwrap();
+        }
+        Cursor::new(buf)
+    }
+
+    #[test]
+    fn zip_under_entry_cap_still_works() {
+        // Sanity: an archive with a few entries goes through normally.
+        let zip = build_zip_with_n_dummies(5);
+        let (name, _) =
+            read_first_image(zip, &Settings::default()).expect("small archive should pass");
+        assert_eq!(name, "cover.png");
+    }
+
+    #[test]
+    fn zip_over_entry_cap_is_rejected() {
+        use crate::limits::MAX_ARCHIVE_ENTRIES;
+
+        // One past the cap: must fail. Total archive size stays modest
+        // (~5 MB of central directory for empty stored entries) so this
+        // remains a normal-cost unit test even at the production cap.
+        let zip = build_zip_with_n_dummies(MAX_ARCHIVE_ENTRIES);
+        let err = read_first_image(zip, &Settings::default()).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too many entries"),
+            "error should mention entry count, got: {msg}"
+        );
     }
 }

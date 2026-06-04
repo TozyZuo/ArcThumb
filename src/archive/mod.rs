@@ -85,25 +85,24 @@ pub fn read_first_image_with_kind<R: Read + Seek>(
     mut reader: R,
     settings: &Settings,
 ) -> Result<Extracted, Box<dyn Error>> {
-    // Size guard: check total stream length before touching any parser.
-    let total = reader.seek(SeekFrom::End(0))?;
-    if total > limits::MAX_ARCHIVE_SIZE {
-        return Err(format!(
-            "archive too large ({total} bytes > {} limit)",
-            limits::MAX_ARCHIVE_SIZE
-        )
-        .into());
-    }
-
-    // Read enough of the header for the `ustar` magic at offset 257.
-    // `Read::read` may return short; `take().read_to_end()` is the
-    // idiomatic "read up to N bytes greedily" pattern.
+    // Detect format first so the size cap can be format-aware: ZIP and 7z
+    // are random-access via their footer index, so file size is a poor
+    // proxy for memory cost. TAR/RAR/FB2/MOBI all need the whole stream
+    // either parsed sequentially or buffered, so they keep the tighter
+    // 2 GiB cap.
     reader.seek(SeekFrom::Start(0))?;
     let mut magic: Vec<u8> = Vec::with_capacity(512);
     reader.by_ref().take(512).read_to_end(&mut magic)?;
+    let format = detect_format(&magic);
+
+    let total = reader.seek(SeekFrom::End(0))?;
+    let max_size = max_archive_size_for(format);
+    if total > max_size {
+        return Err(format!("archive too large ({total} bytes > {max_size} limit)").into());
+    }
     reader.seek(SeekFrom::Start(0))?;
 
-    let (name, bytes, kind) = match detect_format(&magic) {
+    let (name, bytes, kind) = match format {
         Format::Zip => zip::zip_read_first_image(reader, settings)?,
         Format::SevenZ => with_kind(
             sevenz::sevenz_read_first_image(reader, settings)?,
@@ -122,6 +121,19 @@ pub fn read_first_image_with_kind<R: Read + Seek>(
         Format::Unknown => return Err("unrecognised archive format".into()),
     };
     Ok(Extracted { name, bytes, kind })
+}
+
+/// Size cap that applies to a given detected format. Random-access
+/// containers (ZIP, 7z) get the loose `MAX_ARCHIVE_SIZE_INDEXED`
+/// because their footer-index design means total file size doesn't
+/// drive our memory use; everything else gets `MAX_ARCHIVE_SIZE_SEQUENTIAL`.
+fn max_archive_size_for(format: Format) -> u64 {
+    match format {
+        Format::Zip | Format::SevenZ => limits::MAX_ARCHIVE_SIZE_INDEXED,
+        Format::Tar | Format::Rar | Format::Fb2 | Format::Mobi | Format::Unknown => {
+            limits::MAX_ARCHIVE_SIZE_SEQUENTIAL
+        }
+    }
 }
 
 /// Tack a fixed [`ContentKind`] onto a backend's `(name, bytes)` pair.
@@ -287,6 +299,39 @@ mod tests {
         let bytes = b"this is plain text, definitely not an archive".to_vec();
         let result = read_first_image(Cursor::new(bytes), &Settings::default());
         assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // max_archive_size_for: format-aware size cap dispatch.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn indexed_formats_get_the_loose_cap() {
+        assert_eq!(
+            max_archive_size_for(Format::Zip),
+            limits::MAX_ARCHIVE_SIZE_INDEXED
+        );
+        assert_eq!(
+            max_archive_size_for(Format::SevenZ),
+            limits::MAX_ARCHIVE_SIZE_INDEXED
+        );
+    }
+
+    #[test]
+    fn sequential_formats_get_the_tight_cap() {
+        for f in [
+            Format::Tar,
+            Format::Rar,
+            Format::Fb2,
+            Format::Mobi,
+            Format::Unknown,
+        ] {
+            assert_eq!(
+                max_archive_size_for(f),
+                limits::MAX_ARCHIVE_SIZE_SEQUENTIAL,
+                "format {f:?} should use the sequential cap"
+            );
+        }
     }
 
     // ---------------------------------------------------------------

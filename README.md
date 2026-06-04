@@ -228,7 +228,7 @@ The Inno Setup installer does not write any CLSID keys directly. It runs `arcthu
 - AVIF, HEIC, SVG, and DjVu are not supported.
 - Animated GIF and animated WebP show only the first frame.
 - Encrypted archives are not supported.
-- Very large archives are skipped by safety limits, including a 256 MB cap on decoded image size.
+- Very large archives are skipped by safety limits: ZIP and 7z handle files of any practical size, TAR and RAR are capped at 2 GiB, and image decoding stops at 512 MiB to defend against decompression bombs.
 - The preview pane shows the cover image only. There is no multi-image gallery view.
 
 ## License
