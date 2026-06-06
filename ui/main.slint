@@ -80,7 +80,10 @@ export component MainWindow inherits Window {
     // Image formats eligible as thumbnail sources inside archives.
     // Parallel to `arcthumb::settings::SUPPORTED_IMAGE_EXTS`.
     in property <[ExtensionEntry]> image_extensions;
-    in-out property <bool> sort_natural;
+    // Sort order, as an index into the dropdown: 0 = natural, 1 =
+    // alphabetical. Mapped to `SortOrder` on the Rust side. Kept as an
+    // int (not a bool) so the ComboBox can two-way bind to it directly.
+    in-out property <int> sort_index;
     // Cover-name handling, as an index into the dropdown:
     // 0 = prefer, 1 = only, 2 = ignore. Mapped to `CoverMode` on the
     // Rust side (`state::cover_mode_{to,from}_index`).
@@ -190,10 +193,11 @@ export component MainWindow inherits Window {
                     ComboBox {
                         vertical-stretch: 0;
                         model: [root.sort_natural_label, root.sort_alpha_label];
-                        current-index: root.sort_natural ? 0 : 1;
-                        selected(current) => {
-                            root.sort_natural = self.current-index == 0;
-                        }
+                        // Two-way (`<=>`) is required, not a one-way binding:
+                        // the ComboBox writes current-index internally at
+                        // init, which severs a one-way binding and leaves the
+                        // dropdown stuck on the first item after load.
+                        current-index <=> root.sort_index;
                     }
                 }
 
@@ -207,10 +211,9 @@ export component MainWindow inherits Window {
                             root.cover_only_label,
                             root.cover_ignore_label,
                         ];
-                        current-index: root.cover_mode;
-                        selected(current) => {
-                            root.cover_mode = self.current-index;
-                        }
+                        // Two-way (`<=>`) is required — see the sort
+                        // ComboBox above for why a one-way binding breaks.
+                        current-index <=> root.cover_mode;
                     }
                 }
 
