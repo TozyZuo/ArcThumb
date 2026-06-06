@@ -17,6 +17,15 @@ pub(super) fn sevenz_read_first_image<R: Read + Seek>(
 
     let mut sz = SevenZReader::new(reader, size, Password::empty())?;
 
+    let entry_count = sz.archive().files.len();
+    if entry_count > limits::MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "archive has too many entries ({entry_count} > {} limit)",
+            limits::MAX_ARCHIVE_ENTRIES
+        )
+        .into());
+    }
+
     // The 7z metadata lives in the footer, which SevenZReader::new has
     // already parsed — so we can list all entry names without reading
     // any compressed data.
@@ -172,5 +181,23 @@ mod tests {
                 .unwrap_or_else(|e| panic!("7z ext {ext} solo-enabled failed: {e}"));
             assert_eq!(name, entry);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Entry-count cap.
+    //
+    // The actual production threshold (`MAX_ARCHIVE_ENTRIES = 100_000`)
+    // would push 7z compression-per-entry past a reasonable unit-test
+    // budget. We assert here only that a normal-sized archive still
+    // works — the cap check itself is verified end-to-end in zip.rs,
+    // and the check site in sevenz.rs is one straight-line comparison.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sevenz_under_entry_cap_still_works() {
+        let png = make_tiny_png();
+        let sz = build_7z(&[("a.png", &png), ("b.png", &png), ("c.png", &png)]);
+        let (name, _) = read_first_image(sz, &Settings::default()).expect("small 7z should pass");
+        assert!(name.ends_with(".png"));
     }
 }

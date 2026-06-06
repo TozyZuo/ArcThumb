@@ -18,7 +18,16 @@ pub(super) fn tar_read_first_image<R: Read + Seek>(
         reader.seek(SeekFrom::Start(0))?;
         let mut archive = tar::Archive::new(&mut reader);
         let mut candidates: Vec<String> = Vec::new();
+        let mut entry_count: usize = 0;
         for entry in archive.entries()? {
+            entry_count += 1;
+            if entry_count > limits::MAX_ARCHIVE_ENTRIES {
+                return Err(format!(
+                    "archive has too many entries (> {} limit)",
+                    limits::MAX_ARCHIVE_ENTRIES
+                )
+                .into());
+            }
             let entry = entry?;
             if !entry.header().entry_type().is_file() {
                 continue;
@@ -157,5 +166,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("tar ext {ext} solo-enabled failed: {e}"));
             assert_eq!(name, entry);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Entry-count cap.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn tar_under_entry_cap_still_works() {
+        let tar = build_tar(&[("a.png", b"AAA"), ("b.png", b"BBB")]);
+        let (name, _) = read_first_image(tar, &Settings::default()).expect("small tar should pass");
+        assert!(name.ends_with(".png"));
     }
 }
