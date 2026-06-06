@@ -40,6 +40,21 @@ pub fn run_gui() -> Result<(), slint::PlatformError> {
     let initial_model = UiModel::load();
     let lists = ExtensionLists::from_model(&initial_model);
     lists.bind(&window);
+
+    // Drain pending `changed` handlers *before* we push the loaded
+    // values. The Sort and Cover ComboBoxes reset their current-index
+    // to 0 whenever their `model` changes (see combobox-base.slint:
+    // `changed model => reset-current()`), and the model does change
+    // once here — `apply_strings` above swapped the dropdown labels
+    // from their empty defaults to the localized strings. That reset is
+    // queued, not immediate: it would otherwise fire on the first
+    // event-loop iteration, *after* push_model, and snap both dropdowns
+    // back to the first item. Running the handlers now consumes the
+    // reset while the indices are still 0 anyway, so the values we push
+    // next are the final word. The two-way (`<=>`) bindings in
+    // main.slint are what let push_model drive the index afterwards; a
+    // one-way binding would have been severed by the reset's assignment.
+    slint::platform::update_timers_and_animations();
     push_model(&window, &initial_model);
     let state = Rc::new(RefCell::new(initial_model));
 
@@ -193,7 +208,11 @@ fn apply_strings(window: &MainWindow, s: &Strings) {
 /// Extensions are handled separately by `ExtensionModel::replace_enabled`
 /// because they live in a `VecModel` rather than scalar properties.
 fn push_model(window: &MainWindow, model: &UiModel) {
-    window.set_sort_natural(matches!(model.settings.sort_order, SortOrder::Natural));
+    window.set_sort_index(if matches!(model.settings.sort_order, SortOrder::Natural) {
+        0
+    } else {
+        1
+    });
     window.set_cover_mode(state::cover_mode_to_index(model.settings.cover_mode));
     window.set_enable_preview(model.preview_enabled);
     window.set_overlay_border(model.settings.overlay_border);
@@ -205,7 +224,7 @@ fn collect_from_ui(
     lists: &ExtensionLists,
 ) -> (Settings, [bool; EXT_COUNT], bool) {
     let ext_enabled = lists.archive.enabled_array::<EXT_COUNT>();
-    let sort_order = if window.get_sort_natural() {
+    let sort_order = if window.get_sort_index() == 0 {
         SortOrder::Natural
     } else {
         SortOrder::Alphabetical
@@ -433,6 +452,43 @@ mod tests {
                 let (collected, _, _) = collect_from_ui(&window, &lists);
                 assert_eq!(collected.cover_mode, mode, "cover_mode round-trip {mode:?}");
             }
+        }
+
+        // ---- dropdown indices survive the ComboBox model-change reset
+        // Regression guard for #36: the Sort/Cover ComboBoxes reset
+        // current-index to 0 when their model changes (label swap in
+        // apply_strings). run_gui drains that reset *before* push_model,
+        // and the two-way bindings let push_model set the index after.
+        // Here we replay that order, then run the change handlers a
+        // second time (as the first real event-loop iteration would) to
+        // prove the pushed values aren't snapped back to the first item.
+        {
+            let window = MainWindow::new().expect("create MainWindow");
+            apply_strings(&window, &locale::EN); // swaps labels -> queues reset
+            slint::platform::update_timers_and_animations(); // drain reset
+
+            let settings = Settings {
+                sort_order: SortOrder::Alphabetical,
+                cover_mode: CoverMode::Only,
+                ..Settings::default()
+            };
+            let model = UiModel {
+                image_ext_enabled: state::image_ext_mask_to_vec(settings.enabled_image_exts_mask),
+                settings,
+                scope: arcthumb::registry::Scope::PerUser,
+                ext_enabled: [true; EXT_COUNT],
+                preview_enabled: false,
+            };
+            let lists = ExtensionLists::from_model(&model);
+            window.set_extensions(lists.archive.as_model());
+            window.set_image_extensions(lists.image.as_model());
+            push_model(&window, &model);
+
+            // First event-loop iteration would run these again.
+            slint::platform::update_timers_and_animations();
+
+            assert_eq!(window.get_cover_mode(), 1, "cover index survives reset");
+            assert_eq!(window.get_sort_index(), 1, "sort index survives reset");
         }
 
         // ---- toggle_extension_callback_path_via_extension_model

@@ -38,24 +38,29 @@ pub(super) fn rar_read_first_image<R: Read>(
     use unrar::Archive;
 
     // Pass 1: list entries, collect image names, apply user sort + cover pick.
-    let candidates: Vec<String> = Archive::new(&temp_path)
-        .open_for_listing()?
-        .filter_map(|entry| {
-            let e = entry.ok()?;
-            if e.is_directory() {
-                return None;
-            }
-            if e.unpacked_size > limits::MAX_ENTRY_SIZE {
-                return None;
-            }
-            let name = e.filename.to_string_lossy().into_owned();
-            if settings.accepts_image_ext(&name) {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut entry_count: usize = 0;
+    for entry in Archive::new(&temp_path).open_for_listing()? {
+        entry_count += 1;
+        if entry_count > limits::MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "archive has too many entries (> {} limit)",
+                limits::MAX_ARCHIVE_ENTRIES
+            )
+            .into());
+        }
+        let Ok(e) = entry else { continue };
+        if e.is_directory() {
+            continue;
+        }
+        if e.unpacked_size > limits::MAX_ENTRY_SIZE {
+            continue;
+        }
+        let name = e.filename.to_string_lossy().into_owned();
+        if settings.accepts_image_ext(&name) {
+            candidates.push(name);
+        }
+    }
     let target = settings
         .pick_first_image(candidates)
         .ok_or("archive contains no image files")?;
