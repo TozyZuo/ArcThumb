@@ -746,7 +746,7 @@ mod tests {
         // that extension's bit off, round-trip through the registry,
         // and verify the remaining bits survived intact.
         let all = default_enabled_image_exts_mask();
-        for i in 0..SUPPORTED_IMAGE_EXTS.len() {
+        for (i, ext) in SUPPORTED_IMAGE_EXTS.iter().enumerate() {
             let scratch = ScratchSubkey::new(&format!("bit{i}"));
             let original = Settings {
                 enabled_image_exts_mask: all & !(1u32 << i),
@@ -756,8 +756,7 @@ mod tests {
             let loaded = Settings::load_from_subkey(scratch.path());
             assert_eq!(
                 loaded.enabled_image_exts_mask, original.enabled_image_exts_mask,
-                "bit {i} round-trip ({})",
-                SUPPORTED_IMAGE_EXTS[i]
+                "bit {i} round-trip ({ext})"
             );
         }
     }
