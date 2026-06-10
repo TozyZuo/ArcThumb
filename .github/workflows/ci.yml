@@ -3,8 +3,8 @@
 # Runs only on windows-latest because ArcThumb is a Windows shell
 # extension and there is no point compiling it elsewhere.
 #
-# Clippy is intentionally NOT failing on warnings (no `-D warnings`).
-# Tighten this once the codebase is warning-clean.
+# Clippy runs with `-D warnings`: the codebase is warning-clean and
+# any new warning fails the build.
 
 name: CI
 
@@ -39,7 +39,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test (debug)
         run: cargo test

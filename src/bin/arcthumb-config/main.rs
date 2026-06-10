@@ -36,6 +36,7 @@
 
 mod apply;
 mod cache;
+mod cli;
 mod dialogs;
 mod dll_path;
 mod extension_model;
@@ -49,8 +50,8 @@ mod update_check;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
-        Some("--install") => std::process::exit(cli_install()),
-        Some("--uninstall") => std::process::exit(cli_uninstall()),
+        Some("--install") => std::process::exit(cli::run_install(&cli::RealCliOps)),
+        Some("--uninstall") => std::process::exit(cli::run_uninstall(&cli::RealCliOps)),
         _ => {
             // Surface the failure with a native MessageBox before
             // exiting. Release builds run as `windows_subsystem =
@@ -67,55 +68,4 @@ fn main() {
             }
         }
     }
-}
-
-fn cli_install() -> i32 {
-    let dll_path = match dll_path::resolve_dll_path() {
-        Ok(p) => p,
-        Err(_) => return 2,
-    };
-    // HKLM when this process was started elevated (admin Inno install
-    // mode), HKCU otherwise. This is what makes the shell extension
-    // load under High-Integrity Explorer in Windows Sandbox and
-    // enterprise lockdowns where HKCU CLSIDs are ignored.
-    let scope = arcthumb::elevation::current_scope();
-    // Both COM classes (thumbnail provider + preview handler) are
-    // registered together by the installer so the user gets both
-    // features by default. The GUI's "Enable preview pane" checkbox
-    // can later be unchecked to remove just the preview handler.
-    if arcthumb::registry::register_clsid(scope, &dll_path).is_err() {
-        return 3;
-    }
-    if arcthumb::registry::register_preview_clsid(scope, &dll_path).is_err() {
-        return 3;
-    }
-    for ext in arcthumb::registry::EXTENSIONS {
-        if arcthumb::registry::register_extension(scope, ext).is_err() {
-            return 4;
-        }
-        if arcthumb::registry::register_preview_extension(scope, ext).is_err() {
-            return 4;
-        }
-    }
-    // Tell Explorer to drop its icon/thumbnail cache so the freshly
-    // registered handlers take effect without a reboot — this is what
-    // Microsoft's shell extension docs require us to do.
-    arcthumb::registry::notify_assoc_changed();
-    0
-}
-
-fn cli_uninstall() -> i32 {
-    // Clean BOTH hives best-effort. The user may have switched modes
-    // between versions, or an old per-user install may still be lying
-    // around when a new per-machine install is being uninstalled.
-    for scope in arcthumb::registry::Scope::ALL.iter().copied() {
-        for ext in arcthumb::registry::EXTENSIONS {
-            let _ = arcthumb::registry::unregister_extension(scope, ext);
-            let _ = arcthumb::registry::unregister_preview_extension(scope, ext);
-        }
-        let _ = arcthumb::registry::unregister_clsid(scope);
-        let _ = arcthumb::registry::unregister_preview_clsid(scope);
-    }
-    arcthumb::registry::notify_assoc_changed();
-    0
 }

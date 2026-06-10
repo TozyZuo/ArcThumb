@@ -5,6 +5,14 @@
 //! `HKCU\Software\ArcThumb`. All errors are swallowed — the update
 //! check is purely opportunistic and must never block or annoy the
 //! user.
+//!
+//! Two version keys with distinct meanings:
+//! * `LastSeenVersion` — newest release tag observed on GitHub by
+//!   `check_for_update`. Update-check bookkeeping only.
+//! * `LastRunVersion` — version of this binary the last time the
+//!   donation prompt was shown. The donation logic compares against
+//!   this one, because `LastSeenVersion` typically already holds the
+//!   new version before the user installs it.
 
 use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,9 +184,16 @@ pub fn skip_version(version: &str) {
 
 // ── donation prompt ──────────────────────────────────────────────
 
-/// If the user just updated (current version > LastSeenVersion),
-/// returns the current version string for the donation dialog.
+/// If the user just updated (current version > the version that last
+/// ran), returns the current version string for the donation dialog.
 /// Returns `None` if the prompt should be suppressed.
+///
+/// The comparison uses `LastRunVersion`, NOT `LastSeenVersion`:
+/// `check_for_update` records the newest GitHub release into
+/// `LastSeenVersion` *before* the user installs it, so by the time the
+/// updated binary launches the two are equal and a `LastSeenVersion`
+/// comparison would never fire. `LastSeenVersion` is read only as a
+/// fallback for installs that predate the `LastRunVersion` key.
 pub fn should_show_donation() -> Option<String> {
     let key = open_key()?;
 
@@ -191,22 +206,27 @@ pub fn should_show_donation() -> Option<String> {
         return None;
     }
 
-    let last_seen = read_string(&key, "LastSeenVersion")?;
-    // Show prompt only when the running binary is newer than what
-    // the registry last recorded — i.e. the user just installed an
-    // update.
-    if is_newer(effective_version(), &last_seen) {
-        Some(effective_version().to_string())
+    let last_run =
+        read_string(&key, "LastRunVersion").or_else(|| read_string(&key, "LastSeenVersion"))?;
+    donation_version_to_offer(effective_version(), &last_run)
+}
+
+/// Pure core of [`should_show_donation`]: offer the prompt iff the
+/// running binary is newer than the version that last ran — i.e. the
+/// user just installed an update.
+fn donation_version_to_offer(current: &str, last_run: &str) -> Option<String> {
+    if is_newer(current, last_run) {
+        Some(current.to_string())
     } else {
         None
     }
 }
 
-/// Write the current version into `LastSeenVersion` so the donation
+/// Write the current version into `LastRunVersion` so the donation
 /// prompt won't fire again until the next real update.
 pub fn record_donation_shown() {
     if let Some(key) = open_or_create_key() {
-        let _ = key.set_value("LastSeenVersion", &effective_version().to_string());
+        let _ = key.set_value("LastRunVersion", &effective_version().to_string());
     }
 }
 
@@ -296,6 +316,33 @@ mod tests {
             Some("https://example.com/release".to_string())
         );
         assert_eq!(extract_json_string(json, "missing"), None);
+    }
+
+    #[test]
+    fn donation_offered_only_after_an_update() {
+        // Just updated: running binary is newer than the last run.
+        assert_eq!(
+            donation_version_to_offer("0.8.0", "0.7.2"),
+            Some("0.8.0".to_string())
+        );
+        // Normal launch, no update since the last run.
+        assert_eq!(donation_version_to_offer("0.8.0", "0.8.0"), None);
+        // Downgrade must not trigger the prompt either.
+        assert_eq!(donation_version_to_offer("0.7.2", "0.8.0"), None);
+    }
+
+    #[test]
+    fn donation_not_suppressed_by_update_check_recording_the_remote_tag() {
+        // Regression test for the LastSeenVersion/LastRunVersion split:
+        // the old build's update check records the upcoming release
+        // (0.8.0) into LastSeenVersion before the user installs it.
+        // Comparing against that value never fires; comparing against
+        // the version that actually ran last (0.7.2) does.
+        assert_eq!(donation_version_to_offer("0.8.0", "0.8.0"), None);
+        assert_eq!(
+            donation_version_to_offer("0.8.0", "0.7.2"),
+            Some("0.8.0".to_string())
+        );
     }
 
     #[test]
