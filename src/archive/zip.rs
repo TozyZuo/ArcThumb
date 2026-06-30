@@ -13,10 +13,13 @@ use crate::{ebook, limits};
 fn try_extract_fb2_from_zip<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Option<(String, Vec<u8>)> {
-    // First pass: find the first `.fb2` entry's name. We can't hold
-    // a borrow into the archive across the second access so we copy
-    // the name out.
-    let fb2_name: String = (0..archive.len()).find_map(|i| {
+    // First pass: find the first `.fb2` entry's index. We look up the
+    // second access by index rather than by name: a ZIP entry whose
+    // name isn't valid UTF-8 and lacks the EFS flag (legacy-codepage
+    // names from Windows tools) is exposed by `name()` as a CP437
+    // transcription, but `by_name` keys on the raw bytes, so a name
+    // round-trip would miss it. See issue #44.
+    let fb2_index: usize = (0..archive.len()).find_map(|i| {
         let f = archive.by_index(i).ok()?;
         if !f.is_file() {
             return None;
@@ -27,12 +30,12 @@ fn try_extract_fb2_from_zip<R: Read + Seek>(
         if f.size() > limits::MAX_ENTRY_SIZE {
             return None;
         }
-        Some(f.name().to_string())
+        Some(i)
     })?;
 
     // Second pass: extract that entry's bytes and pass to the FB2
     // cover extractor.
-    let mut entry = archive.by_name(&fb2_name).ok()?;
+    let mut entry = archive.by_index(fb2_index).ok()?;
     let mut bytes = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut bytes).ok()?;
     ebook::fb2::try_extract_cover(&bytes)
@@ -79,26 +82,32 @@ pub(super) fn zip_read_first_image<R: Read + Seek>(
 
     // Collect image candidates that also fit under the per-entry size
     // cap. Oversized entries are skipped, not an error — maybe a
-    // smaller sibling is usable.
-    let candidates: Vec<String> = (0..archive.len())
+    // smaller sibling is usable. Each candidate carries its entry index
+    // so the chosen image is read back by index, never by name: when an
+    // entry name isn't valid UTF-8 and the EFS flag is clear (legacy
+    // codepage names written by some Windows ZIP tools), `name()`
+    // returns a CP437 transcription whose bytes no longer match the raw
+    // central-directory key that `by_name` looks up, so a name round-trip
+    // would silently miss the entry. See issue #44.
+    let candidates: Vec<(usize, String)> = (0..archive.len())
         .filter_map(|i| {
             let f = archive.by_index(i).ok()?;
             if f.is_file()
                 && settings.accepts_image_ext(f.name())
                 && f.size() <= limits::MAX_ENTRY_SIZE
             {
-                Some(f.name().to_string())
+                Some((i, f.name().to_string()))
             } else {
                 None
             }
         })
         .collect();
 
-    let name = settings
+    let (index, name) = settings
         .pick_first_image(candidates)
         .ok_or("archive contains no (small enough) image files")?;
 
-    let mut file = archive.by_name(&name)?;
+    let mut file = archive.by_index(index)?;
     let mut buf = Vec::with_capacity(file.size() as usize);
     file.read_to_end(&mut buf)?;
 
@@ -168,6 +177,103 @@ mod tests {
             w.finish().unwrap();
         }
         Cursor::new(buf)
+    }
+
+    /// Hand-build a single-entry stored ZIP whose entry name is the raw
+    /// byte sequence `name_bytes`, with the UTF-8 (EFS) general-purpose
+    /// flag set to `efs`. The high-level `ZipWriter` always sets EFS for
+    /// non-ASCII names, so we craft the headers by hand to model archives
+    /// produced by Windows tools that store names in a legacy codepage
+    /// (Shift-JIS, GBK, …) with EFS clear. Used to reproduce issue #44.
+    fn build_raw_zip_single(name_bytes: &[u8], body: &[u8], efs: bool) -> Cursor<Vec<u8>> {
+        let crc = {
+            let mut h = crc32fast::Hasher::new();
+            h.update(body);
+            h.finalize()
+        };
+        let flags: u16 = if efs { 0x0800 } else { 0x0000 };
+        let nlen = name_bytes.len() as u16;
+        let blen = body.len() as u32;
+
+        let mut out = Vec::new();
+        // Local file header.
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&blen.to_le_bytes()); // compressed size
+        out.extend_from_slice(&blen.to_le_bytes()); // uncompressed size
+        out.extend_from_slice(&nlen.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(body);
+
+        // Central directory header.
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&blen.to_le_bytes());
+        out.extend_from_slice(&blen.to_le_bytes());
+        out.extend_from_slice(&nlen.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        out.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        out.extend_from_slice(name_bytes);
+        let cd_size = out.len() as u32 - cd_offset;
+
+        // End of central directory.
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        out.extend_from_slice(&1u16.to_le_bytes()); // entries this disk
+        out.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+
+        Cursor::new(out)
+    }
+
+    #[test]
+    fn zip_non_utf8_name_without_efs_flag_is_extracted() {
+        // Issue #44: a Shift-JIS folder name ("日本/") with the EFS flag
+        // clear. The `.jpg` entry must still produce a thumbnail.
+        let body = make_tiny_png();
+        let mut name = vec![0x93u8, 0xFA, 0x96, 0x7B]; // 日本 in Shift-JIS
+        name.extend_from_slice(b"/sample.jpg");
+        let zip = build_raw_zip_single(&name, &body, false);
+        let (_name, bytes) =
+            read_first_image(zip, &Settings::default()).expect("non-UTF-8 name must extract");
+        assert_eq!(bytes, body);
+    }
+
+    #[test]
+    fn fb2_in_zip_with_non_utf8_name_without_efs_flag_is_extracted() {
+        // Issue #44, FB2 path: the `.fb2.zip` wrapper entry carries a
+        // legacy-codepage name with the EFS flag clear. The cover must
+        // still come through.
+        let png = make_tiny_png();
+        let fb2 = super::super::tests::build_fb2("c.png", &png);
+        let mut name = vec![0x93u8, 0xFA, 0x96, 0x7B]; // 日本 in Shift-JIS
+        name.extend_from_slice(b".fb2");
+        let zip = build_raw_zip_single(&name, &fb2, false);
+        let (name, bytes) =
+            read_first_image(zip, &Settings::default()).expect("non-UTF-8 fb2.zip must extract");
+        assert_eq!(name, "c.png");
+        let img = crate::decode::decode_with_limits(&name, &bytes).expect("decode fb2.zip cover");
+        assert_eq!(img.width(), 2);
     }
 
     #[test]
