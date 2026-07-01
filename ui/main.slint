@@ -53,6 +53,7 @@ export component MainWindow inherits Window {
     in property <string> menu_file;
     in property <string> menu_file_exit;
     in property <string> menu_help;
+    in property <string> menu_help_check_updates;
     in property <string> menu_help_donate;
     in property <string> menu_help_about;
     in property <string> group_extensions;
@@ -100,6 +101,7 @@ export component MainWindow inherits Window {
     callback regenerate_clicked();
     callback about_clicked();
     callback donate_clicked();
+    callback check_updates_clicked();
     callback exit_clicked();
     // User flipped the checkbox at row `index`. Slint forwards a
     // notification only — the Rust side mutates the underlying
@@ -118,6 +120,10 @@ export component MainWindow inherits Window {
         }
         Menu {
             title: root.menu_help;
+            MenuItem {
+                title: root.menu_help_check_updates;
+                activated => { root.check_updates_clicked(); }
+            }
             MenuItem {
                 title: root.menu_help_donate;
                 activated => { root.donate_clicked(); }
@@ -433,6 +439,7 @@ export component MainWindowPreview inherits MainWindow {
     menu_file: "ファイル";
     menu_file_exit: "終了";
     menu_help: "ヘルプ";
+    menu_help_check_updates: "更新を確認";
     menu_help_donate: "ArcThumb を支援する";
     menu_help_about: "ArcThumb について";
     group_extensions: "有効にする拡張子";

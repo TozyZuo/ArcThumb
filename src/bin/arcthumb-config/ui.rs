@@ -106,6 +106,12 @@ pub fn run_gui() -> Result<(), slint::PlatformError> {
         update::open_url(strings.support_url);
     });
 
+    // Help → Check for updates — manual check that ignores the 24-hour
+    // throttle and any skipped version.
+    window.on_check_updates_clicked(move || {
+        update_check::run_manual_check(strings);
+    });
+
     // Help → About
     window.on_about_clicked(move || {
         dialogs::show_about(strings);
@@ -191,6 +197,7 @@ fn apply_strings(window: &MainWindow, s: &Strings) {
     window.set_menu_file(SharedString::from(s.menu_file));
     window.set_menu_file_exit(SharedString::from(s.menu_file_exit));
     window.set_menu_help(SharedString::from(s.menu_help));
+    window.set_menu_help_check_updates(SharedString::from(s.menu_help_check_updates));
     window.set_menu_help_donate(SharedString::from(s.menu_help_donate));
     window.set_menu_help_about(SharedString::from(s.menu_help_about));
     window.set_group_extensions(SharedString::from(s.group_extensions));
@@ -540,6 +547,10 @@ mod tests {
             assert_eq!(window.get_menu_file(), locale::EN.menu_file);
             assert_eq!(window.get_menu_file_exit(), locale::EN.menu_file_exit);
             assert_eq!(window.get_menu_help(), locale::EN.menu_help);
+            assert_eq!(
+                window.get_menu_help_check_updates(),
+                locale::EN.menu_help_check_updates
+            );
             assert_eq!(window.get_menu_help_donate(), locale::EN.menu_help_donate);
             assert_eq!(window.get_menu_help_about(), locale::EN.menu_help_about);
             assert_eq!(window.get_group_extensions(), locale::EN.group_extensions);
@@ -575,6 +586,10 @@ mod tests {
             apply_strings(&window, &locale::JA);
 
             assert_eq!(window.get_window_title(), locale::JA.window_title);
+            assert_eq!(
+                window.get_menu_help_check_updates(),
+                locale::JA.menu_help_check_updates
+            );
             assert_eq!(window.get_menu_help_donate(), locale::JA.menu_help_donate);
             assert_eq!(window.get_menu_help_about(), locale::JA.menu_help_about);
             assert_eq!(window.get_group_extensions(), locale::JA.group_extensions);
