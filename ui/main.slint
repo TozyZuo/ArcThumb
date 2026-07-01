@@ -53,6 +53,7 @@ export component MainWindow inherits Window {
     in property <string> menu_file;
     in property <string> menu_file_exit;
     in property <string> menu_help;
+    in property <string> menu_help_donate;
     in property <string> menu_help_about;
     in property <string> group_extensions;
     in property <string> group_image_exts;
@@ -98,6 +99,7 @@ export component MainWindow inherits Window {
     callback apply_clicked();
     callback regenerate_clicked();
     callback about_clicked();
+    callback donate_clicked();
     callback exit_clicked();
     // User flipped the checkbox at row `index`. Slint forwards a
     // notification only — the Rust side mutates the underlying
@@ -116,6 +118,10 @@ export component MainWindow inherits Window {
         }
         Menu {
             title: root.menu_help;
+            MenuItem {
+                title: root.menu_help_donate;
+                activated => { root.donate_clicked(); }
+            }
             MenuItem {
                 title: root.menu_help_about;
                 activated => { root.about_clicked(); }
@@ -374,12 +380,12 @@ export component DonationDialog inherits Window {
     in property <string> dialog_title;
     in property <string> message_text;
     in property <string> dont_show_label;
-    in property <string> btn_sponsor;
+    in property <string> btn_support;
     in property <string> btn_later;
 
     in-out property <bool> dont_show_checked: false;
 
-    callback sponsor_clicked();
+    callback support_clicked();
     callback later_clicked();
 
     VerticalBox {
@@ -402,9 +408,9 @@ export component DonationDialog inherits Window {
             spacing: 6px;
             Rectangle { horizontal-stretch: 1; }
             Button {
-                text: root.btn_sponsor;
+                text: root.btn_support;
                 primary: true;
-                clicked => { root.sponsor_clicked(); }
+                clicked => { root.support_clicked(); }
             }
             Button {
                 text: root.btn_later;
@@ -427,6 +433,7 @@ export component MainWindowPreview inherits MainWindow {
     menu_file: "ファイル";
     menu_file_exit: "終了";
     menu_help: "ヘルプ";
+    menu_help_donate: "ArcThumb を支援する";
     menu_help_about: "ArcThumb について";
     group_extensions: "有効にする拡張子";
     group_image_exts: "サムネイルに使う画像形式 (アーカイブ内)";

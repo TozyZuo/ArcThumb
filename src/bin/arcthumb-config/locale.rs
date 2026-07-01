@@ -18,6 +18,7 @@ pub struct Strings {
     pub menu_file: &'static str,
     pub menu_file_exit: &'static str,
     pub menu_help: &'static str,
+    pub menu_help_donate: &'static str,
     pub menu_help_about: &'static str,
     pub group_extensions: &'static str,
     pub group_image_exts: &'static str,
@@ -56,8 +57,15 @@ pub struct Strings {
     pub donation_title: &'static str,
     pub donation_prompt: &'static str,
     pub donation_dont_show_checkbox: &'static str,
-    pub donation_btn_sponsor: &'static str,
+    pub donation_btn_support: &'static str,
     pub donation_btn_later: &'static str,
+    // The support page opened from Help → Support and from the
+    // post-update prompt. Locale-specific path so an English UI lands
+    // on the English page and a Japanese UI on the Japanese one. This
+    // is the only donation URL baked into the binary — the platform
+    // links (GitHub Sponsors, Buy Me a Coffee) live on that page, so
+    // they can change without an app rebuild.
+    pub support_url: &'static str,
 }
 
 pub const EN: Strings = Strings {
@@ -65,6 +73,7 @@ pub const EN: Strings = Strings {
     menu_file: "File",
     menu_file_exit: "Exit",
     menu_help: "Help",
+    menu_help_donate: "Support ArcThumb",
     menu_help_about: "About ArcThumb",
     group_extensions: "Enabled extensions",
     group_image_exts: "Image formats used for thumbnails (inside archives)",
@@ -101,8 +110,9 @@ pub const EN: Strings = Strings {
     donation_title: "Thank you for updating!",
     donation_prompt: "ArcThumb has been updated to v{}.\nWould you like to support development?",
     donation_dont_show_checkbox: "Don't show this again",
-    donation_btn_sponsor: "Open sponsor page",
+    donation_btn_support: "Open support page",
     donation_btn_later: "Maybe next time",
+    support_url: "https://citrussoda.com/en/arcthumb/sponsor",
 };
 
 pub const JA: Strings = Strings {
@@ -110,6 +120,7 @@ pub const JA: Strings = Strings {
     menu_file: "ファイル",
     menu_file_exit: "終了",
     menu_help: "ヘルプ",
+    menu_help_donate: "ArcThumb を支援する",
     menu_help_about: "ArcThumb について",
     group_extensions: "有効にする拡張子",
     group_image_exts: "サムネイルに使う画像形式 (アーカイブ内)",
@@ -146,8 +157,9 @@ pub const JA: Strings = Strings {
     donation_title: "アップデートありがとうございます！",
     donation_prompt: "ArcThumb v{} にアップデートされました。\n開発を支援しますか？",
     donation_dont_show_checkbox: "今後表示しない",
-    donation_btn_sponsor: "スポンサーページを開く",
+    donation_btn_support: "支援ページを開く",
     donation_btn_later: "また今度",
+    support_url: "https://citrussoda.com/arcthumb/sponsor",
 };
 
 /// Resolve the UI language to use right now.

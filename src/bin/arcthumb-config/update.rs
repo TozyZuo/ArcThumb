@@ -39,9 +39,6 @@ const GITHUB_API_URL: &str = "https://api.github.com/repos/citrussoda-com/ArcThu
 /// Download page opened by the update notification.
 const DOWNLOAD_URL: &str = "https://citrussoda.com/arcthumb";
 
-/// Sponsor page opened by the donation prompt.
-const SPONSOR_URL: &str = "https://github.com/sponsors/citrussoda-com";
-
 /// Minimum interval between update checks (seconds).
 const CHECK_INTERVAL_SECS: u64 = 86_400; // 24 hours
 
@@ -241,10 +238,6 @@ pub fn dismiss_donation() {
     if let Some(key) = open_or_create_key() {
         let _ = key.set_value("DonationDismissed", &1u32);
     }
-}
-
-pub fn sponsor_url() -> &'static str {
-    SPONSOR_URL
 }
 
 // ── open URL in default browser ──────────────────────────────────
