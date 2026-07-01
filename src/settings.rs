@@ -236,29 +236,34 @@ impl Settings {
         })
     }
 
-    /// Pick the "best" image name from a list of candidates according
-    /// to this settings snapshot. Applies `sort_order` and
-    /// `cover_mode`.
+    /// Pick the "best" image from a list of candidates according to
+    /// this settings snapshot. Applies `sort_order` and `cover_mode`.
+    ///
+    /// Each candidate reports (via [`ImageCandidate`]) the entry name
+    /// used for sorting and cover detection, and the chosen candidate is
+    /// returned whole. That lets a random-access backend carry its entry
+    /// index through selection and read by index afterwards, while a
+    /// sequential backend carries the name it will match on a second
+    /// pass. Nothing here re-derives a name into a lookup key.
     ///
     /// In [`CoverMode::Only`] a list with no cover-named image yields
     /// `None`, which the archive backends turn into a "no image" error
     /// and ultimately a default Explorer icon.
-    pub fn pick_first_image(&self, mut names: Vec<String>) -> Option<String> {
-        if names.is_empty() {
+    pub fn pick_first_image<T: ImageCandidate>(&self, mut items: Vec<T>) -> Option<T> {
+        if items.is_empty() {
             return None;
         }
         match self.sort_order {
-            SortOrder::Alphabetical => names.sort(),
-            SortOrder::Natural => names.sort_by(|a, b| natural_cmp(a, b)),
+            SortOrder::Alphabetical => items.sort_by(|a, b| a.name().cmp(b.name())),
+            SortOrder::Natural => items.sort_by(|a, b| natural_cmp(a.name(), b.name())),
         }
         match self.cover_mode {
-            CoverMode::Ignore => names.into_iter().next(),
-            CoverMode::Prefer => names
-                .iter()
-                .find(|n| is_cover_name(n))
-                .cloned()
-                .or_else(|| names.into_iter().next()),
-            CoverMode::Only => names.into_iter().find(|n| is_cover_name(n)),
+            CoverMode::Ignore => items.into_iter().next(),
+            CoverMode::Prefer => match items.iter().position(|t| is_cover_name(t.name())) {
+                Some(pos) => Some(items.swap_remove(pos)),
+                None => items.into_iter().next(),
+            },
+            CoverMode::Only => items.into_iter().find(|t| is_cover_name(t.name())),
         }
     }
 
@@ -307,6 +312,28 @@ fn ends_with_ignore_ascii_case(s: &str, suffix: &str) -> bool {
 // =============================================================================
 // Image selection helpers (used by Settings::pick_first_image)
 // =============================================================================
+
+/// A candidate image entry that can report the name used to sort it and
+/// to detect cover filenames. Implemented for a bare `String` (the name
+/// is the candidate, used by the sequential backends that match by name
+/// on a second pass) and for `(index, name)` (used by the random-access
+/// ZIP backend, which carries the entry index through selection and then
+/// reads by index).
+pub trait ImageCandidate {
+    fn name(&self) -> &str;
+}
+
+impl ImageCandidate for String {
+    fn name(&self) -> &str {
+        self
+    }
+}
+
+impl ImageCandidate for (usize, String) {
+    fn name(&self) -> &str {
+        &self.1
+    }
+}
 
 /// Is this path a well-known cover-image filename? Checks the
 /// basename (without extension) against a small allowlist.
@@ -492,7 +519,10 @@ mod tests {
 
     #[test]
     fn pick_first_image_empty() {
-        assert_eq!(Settings::default().pick_first_image(vec![]), None);
+        assert_eq!(
+            Settings::default().pick_first_image(Vec::<String>::new()),
+            None
+        );
     }
 
     #[test]

@@ -12,6 +12,15 @@ ArcThumb is inspired by [CBXShell](https://github.com/T800G/CBXShell) and [DarkT
 
 ![Explorer showing ArcThumb-generated thumbnails for comic archives and EPUB files](assets/explorer.png)
 
+## Support
+
+ArcThumb is free and maintained in my spare time. If it saved you some clicking around, a small tip helps me keep at it:
+
+- [GitHub Sponsors](https://github.com/sponsors/citrussoda-com) for one-off or monthly support
+- [Buy Me a Coffee](https://buymeacoffee.com/citrus.soda) for a quick one-time tip
+
+No pressure. Starring the repo or sending a clear bug report is worth just as much.
+
 ## What it does
 
 - Shows the first image (or the cover, if one is identifiable) from an archive as the file's thumbnail in Explorer.

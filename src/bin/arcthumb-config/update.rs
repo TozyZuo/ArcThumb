@@ -39,9 +39,6 @@ const GITHUB_API_URL: &str = "https://api.github.com/repos/citrussoda-com/ArcThu
 /// Download page opened by the update notification.
 const DOWNLOAD_URL: &str = "https://citrussoda.com/arcthumb";
 
-/// Sponsor page opened by the donation prompt.
-const SPONSOR_URL: &str = "https://github.com/sponsors/citrussoda-com";
-
 /// Minimum interval between update checks (seconds).
 const CHECK_INTERVAL_SECS: u64 = 86_400; // 24 hours
 
@@ -126,11 +123,12 @@ pub fn should_check_now() -> bool {
 
 // ── GitHub API call ──────────────────────────────────────────────
 
-/// Hit the GitHub releases API and return info about the latest
-/// release if it is newer than the running version. Writes
-/// `LastUpdateCheck` and `LastSeenVersion` to the registry on
-/// success.
-pub fn check_for_update() -> Option<UpdateInfo> {
+/// Hit the GitHub releases API and return the latest release version
+/// (with any `v` prefix stripped), or `None` on any network or parse
+/// failure. Records `LastUpdateCheck` and `LastSeenVersion` on
+/// success so the throttle and donation logic stay consistent whether
+/// the check was automatic or manual.
+fn fetch_latest_version() -> Option<String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .build()
@@ -147,23 +145,57 @@ pub fn check_for_update() -> Option<UpdateInfo> {
         .ok()?;
 
     let tag = extract_json_string(&body, "tag_name")?;
+    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
 
     // Record the check timestamp regardless of whether a new version
     // exists, so we don't hammer the API on every launch.
     if let Some(key) = open_or_create_key() {
         let _ = key.set_value("LastUpdateCheck", &now_unix_secs());
-        let version = tag.strip_prefix('v').unwrap_or(&tag);
-        let _ = key.set_value("LastSeenVersion", &version.to_string());
+        let _ = key.set_value("LastSeenVersion", &version);
     }
 
-    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    if is_newer(&version, effective_version()) {
-        Some(UpdateInfo {
+    Some(version)
+}
+
+/// Background check: return info about the latest release only if it
+/// is newer than the running version. `None` covers both "already up
+/// to date" and "check failed" — the silent path treats them the same.
+pub fn check_for_update() -> Option<UpdateInfo> {
+    match classify_check(fetch_latest_version(), effective_version()) {
+        ManualCheck::Available(info) => Some(info),
+        ManualCheck::UpToDate | ManualCheck::Failed => None,
+    }
+}
+
+/// Outcome of a user-initiated ("Check for updates") check. Unlike the
+/// silent background path, a manual check has to report "you're up to
+/// date" and network failures so the button can give real feedback.
+pub enum ManualCheck {
+    UpToDate,
+    Available(UpdateInfo),
+    Failed,
+}
+
+/// User-initiated check. Ignores the 24-hour throttle and any skipped
+/// version — the user asked, so always hit the network and report the
+/// three-way result.
+pub fn check_for_update_now() -> ManualCheck {
+    classify_check(fetch_latest_version(), effective_version())
+}
+
+/// Pure decision core shared by both checks: map a fetched latest
+/// version (`None` on any network/parse failure) against the running
+/// version into an outcome. Split out from the network fetch so it can
+/// be unit-tested without hitting GitHub — same pattern as
+/// [`donation_version_to_offer`].
+fn classify_check(fetched: Option<String>, current: &str) -> ManualCheck {
+    match fetched {
+        None => ManualCheck::Failed,
+        Some(version) if is_newer(&version, current) => ManualCheck::Available(UpdateInfo {
             latest_version: version,
             release_url: DOWNLOAD_URL.to_string(),
-        })
-    } else {
-        None
+        }),
+        Some(_) => ManualCheck::UpToDate,
     }
 }
 
@@ -243,10 +275,6 @@ pub fn dismiss_donation() {
     }
 }
 
-pub fn sponsor_url() -> &'static str {
-    SPONSOR_URL
-}
-
 // ── open URL in default browser ──────────────────────────────────
 
 pub fn open_url(url: &str) {
@@ -302,6 +330,35 @@ mod tests {
         assert!(is_newer("1.0.0", "0.99.99"));
         assert!(!is_newer("0.2.0", "0.2.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
+    }
+
+    #[test]
+    fn classify_check_maps_every_outcome() {
+        // Fetch failed (network/parse) → Failed.
+        assert!(matches!(classify_check(None, "0.7.2"), ManualCheck::Failed));
+
+        // A newer remote release → Available, carrying that version and
+        // the download URL.
+        match classify_check(Some("0.8.0".to_string()), "0.7.2") {
+            ManualCheck::Available(info) => {
+                assert_eq!(info.latest_version, "0.8.0");
+                assert_eq!(info.release_url, DOWNLOAD_URL);
+            }
+            _ => panic!("a newer remote version should be Available"),
+        }
+
+        // Same version → UpToDate, not Available.
+        assert!(matches!(
+            classify_check(Some("0.7.2".to_string()), "0.7.2"),
+            ManualCheck::UpToDate
+        ));
+
+        // Older remote (e.g. a yanked release) must not offer a
+        // "downgrade" — still UpToDate.
+        assert!(matches!(
+            classify_check(Some("0.7.0".to_string()), "0.7.2"),
+            ManualCheck::UpToDate
+        ));
     }
 
     #[test]
