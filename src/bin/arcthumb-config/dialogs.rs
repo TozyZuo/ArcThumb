@@ -144,9 +144,15 @@ pub fn show_update_dialog(info: update::UpdateInfo, strings: &'static Strings) {
 }
 
 // =============================================================================
-// Donation dialog — Slint window with a "Don't show again" checkbox.
+// Donation dialog — post-update prompt linking to the support page.
 // =============================================================================
 
+/// Post-update prompt shown once after the user installs a newer
+/// build. It nudges toward the support page and carries the "don't
+/// show again" checkbox that governs whether this prompt fires again.
+/// The button opens `support_url`; the platform links (GitHub
+/// Sponsors, Buy Me a Coffee) live on that page, so the binary never
+/// bakes in a donation URL that could go stale.
 pub fn show_donation_dialog(version: &str, strings: &'static Strings) {
     let already_open = DONATION_DIALOG.with(|h| h.borrow().is_some());
     if already_open {
@@ -163,26 +169,27 @@ pub fn show_donation_dialog(version: &str, strings: &'static Strings) {
     dialog.set_dialog_title(SharedString::from(strings.donation_title));
     dialog.set_message_text(SharedString::from(body));
     dialog.set_dont_show_label(SharedString::from(strings.donation_dont_show_checkbox));
-    dialog.set_btn_sponsor(SharedString::from(strings.donation_btn_sponsor));
+    dialog.set_btn_support(SharedString::from(strings.donation_btn_support));
     dialog.set_btn_later(SharedString::from(strings.donation_btn_later));
 
-    // Open sponsor page. The "don't show again" checkbox is a hard
-    // dismissal — record it so the prompt never fires again.
+    // Open the support page. The "don't show again" checkbox is a hard
+    // dismissal, so honor it before leaving.
     {
         let weak = dialog.as_weak();
-        dialog.on_sponsor_clicked(move || {
+        dialog.on_support_clicked(move || {
             if let Some(d) = weak.upgrade() {
                 if d.get_dont_show_checked() {
                     update::dismiss_donation();
                 }
                 let _ = d.hide();
             }
-            update::open_url(update::sponsor_url());
+            update::open_url(strings.support_url);
             DONATION_DIALOG.with(|h| *h.borrow_mut() = None);
         });
     }
 
-    // Maybe next time. Honors the dismiss checkbox the same way.
+    // Maybe next time. Counts as a skip unless "don't show again" is
+    // ticked, in which case it's a hard dismissal instead.
     {
         let weak = dialog.as_weak();
         dialog.on_later_clicked(move || {
