@@ -1,0 +1,59 @@
+# Build a testable installer for the LIVP feature branch. This runs
+# independently of the release workflow: it never tags, publishes a
+# release, or changes the package version.
+
+name: LIVP test installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/livp-thumbnail-support]
+
+concurrency:
+  group: livp-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and build installer
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Build installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
+        with:
+          path: installer/arcthumb.iss
+          options: /O+
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcThumb-LIVP-Setup
+          path: target/installer/ArcThumb-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
