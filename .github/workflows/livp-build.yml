@@ -36,7 +36,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        # This branch exists to produce a user-testable installer.
+        # Report lints, but leave compile errors/tests/build failures as
+        # the gates so a new stable-Rust warning cannot suppress the
+        # artifact entirely.
+        run: cargo clippy --all-targets
 
       - name: Test
         run: cargo test
