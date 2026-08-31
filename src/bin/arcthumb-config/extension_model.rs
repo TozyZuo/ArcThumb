@@ -6,7 +6,7 @@
 //!
 //! ## Why a wrapper
 //!
-//! Before Phase 1 of the refactor, the 12 supported extensions were
+//! Before Phase 1 of the refactor, the supported extensions were
 //! hand-listed in four places: `state::EXT_COUNT`, `ui::push_model`,
 //! `ui::collect_from_ui`, and `ui/main.slint`. Adding `.tar.gz`
 //! meant editing all four. With this wrapper, the GUI list is built
@@ -154,8 +154,8 @@ mod tests {
     use super::*;
 
     fn baseline_enabled() -> Vec<bool> {
-        // 12 entries (matching registry::EXTENSIONS), with a
-        // recognisable pattern so flipped indices are detectable.
+        // One entry per registry extension, with a recognisable
+        // pattern so flipped indices are detectable.
         let mut v = vec![false; registry::EXTENSIONS.len()];
         v[0] = true; // .zip
         v[2] = true; // .rar
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn enabled_array_round_trips_through_from_enabled() {
-        const N: usize = 12;
+        const N: usize = registry::EXTENSIONS.len();
         let original = baseline_enabled();
         let model = ExtensionModel::from_enabled(&original);
         let snapshot: [bool; N] = model.enabled_array::<N>();
@@ -238,7 +238,7 @@ mod tests {
         new_enabled[7] = false; // .epub
         model.replace_enabled(&new_enabled);
 
-        let snapshot = model.enabled_array::<12>();
+        let snapshot = model.enabled_array::<{ registry::EXTENSIONS.len() }>();
         assert!(snapshot[0]); // .zip still on
         assert!(snapshot[1]); // .cbz newly on
         assert!(snapshot[2]); // .rar still on

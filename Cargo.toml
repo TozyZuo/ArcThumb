@@ -2,7 +2,7 @@
 name = "arcthumb"
 version = "0.7.2"
 edition = "2024"
-description = "Windows Shell Extension that generates Explorer thumbnails and preview-pane previews for comic-book archives (ZIP/CBZ/RAR/CBR/7Z/CB7/CBT) and ebooks (EPUB/FB2/MOBI/AZW/AZW3)."
+description = "Windows Shell Extension that generates Explorer thumbnails and preview-pane previews for archives, LIVP live photos, and ebooks."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/citrussoda-com/ArcThumb"
 readme = "README.md"
@@ -31,6 +31,7 @@ windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

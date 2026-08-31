@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/github/v/release/citrussoda-com/ArcThumb?label=version&color=green)](https://github.com/citrussoda-com/ArcThumb/releases)
 [![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey.svg)](#)
 
-A Windows Explorer shell extension that shows cover thumbnails and preview-pane previews for comic book archives (ZIP, CBZ, RAR, CBR, 7Z, CB7, CBT) and ebooks (EPUB, FB2, MOBI, AZW, AZW3).
+A Windows Explorer shell extension that shows thumbnails and preview-pane previews for comic book archives (ZIP, CBZ, RAR, CBR, 7Z, CB7, CBT), Apple Live Photos (`.livp`), and ebooks (EPUB, FB2, MOBI, AZW, AZW3).
 
 ArcThumb is inspired by [CBXShell](https://github.com/T800G/CBXShell) and [DarkThumbs](https://github.com/fire-eggs/DarkThumbs), rewritten in Rust with WebP support and Windows 10/11 as the baseline.
 
@@ -24,6 +24,7 @@ No pressure. Starring the repo or sending a clear bug report is worth just as mu
 ## What it does
 
 - Shows the first image (or the cover, if one is identifiable) from an archive as the file's thumbnail in Explorer.
+- Reads the HEIC/HEIF or JPEG still image directly from a `.livp` Apple Live Photo without unpacking it on disk.
 - For ebooks, parses the format-specific metadata so the right cover is picked instead of an arbitrary embedded image. EPUB uses the OPF manifest, FB2 uses the `<coverpage>` reference, and MOBI/AZW/AZW3 use the EXTH 201 CoverOffset record.
 - Implements `IPreviewHandler` so the same cover shows up in Explorer's preview pane (`Alt+P`), rescaled when the splitter moves.
 - Can bake an identification overlay into archive thumbnails — a format-coloured border and a corner label (`CBZ`, `EPUB`, …) — so archives stand out from plain images. Off by default.
@@ -41,13 +42,14 @@ No pressure. Starring the repo or sending a clear bug report is worth just as mu
 | `.rar`, `.cbr` | RAR / Comic Book RAR | |
 | `.7z`, `.cb7`  | 7-Zip / Comic Book 7z | |
 | `.cbt`         | Comic Book TAR | uncompressed tar |
+| `.livp`        | Apple Live Photo | ZIP container; HEIC/HEIF or JPEG still image |
 | `.epub`        | EPUB 2 / EPUB 3 | OPF manifest |
 | `.fb2`         | FictionBook 2 | inline base64 binaries |
 | `.mobi`, `.azw`, `.azw3` | Amazon Kindle | EXTH 201 CoverOffset |
 
 ### Image formats inside archives
 
-JPEG, PNG, GIF, BMP, TIFF, ICO, and WebP. Each format can be individually enabled or disabled in the configuration GUI. AVIF, HEIC, and SVG are not supported yet, mostly because their reference decoders pull in heavy C dependencies.
+JPEG, PNG, GIF, BMP, TIFF, ICO, WebP, HEIC, and HEIF. Each format can be individually enabled or disabled in the configuration GUI. HEIC/HEIF decoding uses Windows Imaging Component (WIC), so a compatible system codec such as `wic_heic` must be installed. AVIF and SVG are not supported.
 
 ## Installing
 
@@ -62,7 +64,7 @@ Open **ArcThumb Configuration** from the Start menu.
 ![ArcThumb Configuration dialog with extension toggles, sort order, cover preference and the Regenerate thumbnails button](assets/screenshot.png)
 
 - **Enabled extensions** turns the thumbnail provider on or off per file extension.
-- **Image formats used for thumbnails** chooses which image formats (JPEG, PNG, GIF, BMP, TIFF, WebP, ICO) are eligible when picking a thumbnail from inside an archive. Disabling a format causes ArcThumb to skip files with that extension. This setting does not affect ebooks (EPUB, FB2, MOBI), which use their own metadata to locate the cover.
+- **Image formats used for thumbnails** chooses which image formats (JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, HEIC, HEIF) are eligible when picking a thumbnail from inside an archive or LIVP. Disabling a format causes ArcThumb to skip files with that extension. This setting does not affect ebooks (EPUB, FB2, MOBI), which use their own metadata to locate the cover.
 - **Sort order** decides which image counts as "the first one" inside an archive. Natural sort treats `page2.jpg` as smaller than `page10.jpg`. Alphabetical does the opposite. Natural is the default and is usually what you want for comics.
 - **Cover image** controls how ArcThumb treats files named `cover.*`, `folder.*`, `thumb.*`, `thumbnail.*`, or `front.*` (matched without regard to case). *Use cover if present, else first page* is the default: it picks one of those names when the archive has one and otherwise falls back to sort order. *Cover only* uses one of those names and shows no thumbnail at all when none exists, so an unrelated ZIP that happens to contain a stray image keeps the plain archive icon instead of borrowing it as a cover. *Always use first page* ignores the names and takes the first image by sort order.
 - **Enable preview pane** is a single switch that registers or unregisters the `IPreviewHandler` for every supported extension at once.
@@ -234,7 +236,8 @@ The Inno Setup installer does not write any CLSID keys directly. It runs `arcthu
 
 ## Known limitations
 
-- AVIF, HEIC, SVG, and DjVu are not supported.
+- HEIC/HEIF requires an installed WIC decoder. If Windows cannot decode the still image, LIVP falls back to the normal file icon.
+- AVIF, SVG, and DjVu are not supported.
 - Animated GIF and animated WebP show only the first frame.
 - Encrypted archives are not supported.
 - Very large archives are skipped by safety limits: ZIP and 7z handle files of any practical size, TAR and RAR are capped at 2 GiB, and image decoding stops at 512 MiB to defend against decompression bombs.

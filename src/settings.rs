@@ -113,6 +113,12 @@ pub const SUPPORTED_IMAGE_EXTS: &[&str] = &[
     ".ico",
     #[cfg(feature = "jxl")]
     ".jxl",
+    // HEIF is decoded through Windows Imaging Component (WIC), so
+    // these entries work when a system HEIF codec such as wic_heic is
+    // installed. Keep them after all pre-existing entries: the index
+    // is persisted as a registry bitmask and therefore append-only.
+    ".heic",
+    ".heif",
 ];
 
 /// All supported extensions enabled. Used as the factory default and

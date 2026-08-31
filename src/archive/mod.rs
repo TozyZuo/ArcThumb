@@ -177,7 +177,7 @@ mod tests {
     fn image_ext_recognised_lowercase() {
         let s = Settings::default();
         for ext in &[
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico",
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico", "heic", "heif",
         ] {
             assert!(s.accepts_image_ext(&format!("foo.{ext}")), "ext={ext}");
         }
@@ -189,6 +189,7 @@ mod tests {
         assert!(s.accepts_image_ext("foo.JPG"));
         assert!(s.accepts_image_ext("foo.PnG"));
         assert!(s.accepts_image_ext("comic/CHAPTER1/01.WEBP"));
+        assert!(s.accepts_image_ext("live-photo/IMG_0001.HEIC"));
     }
 
     #[test]

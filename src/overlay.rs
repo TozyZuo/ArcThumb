@@ -98,7 +98,7 @@ fn label_for(kind: ContentKind, file_ext: Option<&str>) -> LabelSlot {
             Some("azw3") => "AZW3".to_string(),
             _ => "MOBI".to_string(),
         },
-        ContentKind::Zip => ext_label(file_ext, &["zip", "cbz"], "ZIP"),
+        ContentKind::Zip => ext_label(file_ext, &["zip", "cbz", "livp"], "ZIP"),
         ContentKind::SevenZ => ext_label(file_ext, &["7z", "cb7"], "7Z"),
         ContentKind::Rar => ext_label(file_ext, &["rar", "cbr"], "RAR"),
         ContentKind::Tar => ext_label(file_ext, &["tar", "cbt"], "TAR"),
@@ -353,6 +353,7 @@ mod tests {
     fn label_prefers_real_extension_for_containers() {
         assert_eq!(text_of(label_for(ContentKind::Zip, Some("cbz"))), "CBZ");
         assert_eq!(text_of(label_for(ContentKind::Zip, Some("zip"))), "ZIP");
+        assert_eq!(text_of(label_for(ContentKind::Zip, Some("livp"))), "LIVP");
         assert_eq!(text_of(label_for(ContentKind::Rar, Some("cbr"))), "CBR");
         assert_eq!(text_of(label_for(ContentKind::SevenZ, Some("cb7"))), "CB7");
         assert_eq!(text_of(label_for(ContentKind::Tar, Some("cbt"))), "CBT");

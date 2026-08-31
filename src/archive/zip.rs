@@ -179,6 +179,32 @@ mod tests {
         Cursor::new(buf)
     }
 
+    #[test]
+    fn livp_zip_selects_heic_still_and_ignores_mov() {
+        let heic = b"fake HEIC payload";
+        let mov = b"fake QuickTime payload";
+        let livp = build_zip(&[("IMG_0001.MOV", mov), ("IMG_0001.HEIC", heic)]);
+
+        let (name, bytes) =
+            read_first_image(livp, &Settings::default()).expect("LIVP image extraction");
+        assert_eq!(name, "IMG_0001.HEIC");
+        assert_eq!(bytes.as_slice(), heic);
+    }
+
+    #[test]
+    fn livp_zip_accepts_heif_and_jpeg_stills() {
+        for (name, body) in [
+            ("nested/photo.heif", b"HEIF".as_slice()),
+            ("nested/photo.jpeg", b"JPEG".as_slice()),
+        ] {
+            let livp = build_zip(&[("nested/photo.mov", b"MOV"), (name, body)]);
+            let (selected_name, selected_bytes) =
+                read_first_image(livp, &Settings::default()).expect("LIVP image extraction");
+            assert_eq!(selected_name, name);
+            assert_eq!(selected_bytes, body);
+        }
+    }
+
     /// Hand-build a single-entry stored ZIP whose entry name is the raw
     /// byte sequence `name_bytes`, with the UTF-8 (EFS) general-purpose
     /// flag set to `efs`. The high-level `ZipWriter` always sets EFS for

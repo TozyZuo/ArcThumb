@@ -11,11 +11,12 @@
 //! deployed. Build with `cargo build --release --features jxl` to
 //! enable.
 //!
-//! **AVIF / HEIC** are intentionally not supported. Both require C
-//! library dependencies (`libavif`, `libheif`) that conflict with
-//! the "cargo build alone, no system libraries" philosophy of this
-//! project. They may return in a later phase if pure-Rust decoders
-//! mature enough for production use.
+//! **HEIC / HEIF** use Windows Imaging Component (WIC). This keeps
+//! the DLL free of bundled C libraries and lets Windows discover any
+//! installed HEIF codec, including `wic_heic`. A missing codec is a
+//! normal decode error, so Explorer falls back to the file icon.
+//!
+//! **AVIF** remains unsupported by the built-in decoder set.
 
 use std::error::Error;
 use std::io::Cursor;
@@ -25,6 +26,16 @@ use image::ImageDecoder;
 use image::{DynamicImage, ImageReader, Limits};
 
 use crate::limits;
+
+mod wic;
+
+/// Whether a filename denotes an image that should be handed to WIC.
+/// Archive entry names may contain mixed-case extensions, hence the
+/// ASCII-only case fold.
+fn is_wic_heif_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".heic") || lower.ends_with(".heif")
+}
 
 /// Decode image bytes into a full-resolution `DynamicImage`,
 /// dispatching by filename extension. The format is still verified
@@ -40,7 +51,9 @@ pub fn decode_with_limits(name: &str, bytes: &[u8]) -> Result<DynamicImage, Box<
     if name.to_ascii_lowercase().ends_with(".jxl") {
         return decode_jxl(bytes);
     }
-    let _ = name; // only used by the `jxl` branch
+    if is_wic_heif_name(name) {
+        return wic::decode(bytes, 0);
+    }
     decode_via_image_crate(bytes)
 }
 
@@ -65,7 +78,9 @@ pub fn decode_for_thumbnail(
     if name.to_ascii_lowercase().ends_with(".jxl") {
         return decode_jxl(bytes);
     }
-    let _ = name;
+    if is_wic_heif_name(name) {
+        return wic::decode(bytes, target_px);
+    }
 
     if let Some(img) = try_decode_jpeg_scaled(bytes, target_px)? {
         return Ok(img);
@@ -266,6 +281,14 @@ mod tests {
     #[test]
     fn decode_rejects_empty() {
         assert!(decode_with_limits("foo.png", b"").is_err());
+    }
+
+    #[test]
+    fn heif_filename_detection_is_case_insensitive_and_exact() {
+        assert!(is_wic_heif_name("IMG_0001.HEIC"));
+        assert!(is_wic_heif_name("nested/photo.HeIf"));
+        assert!(!is_wic_heif_name("photo.heic.txt"));
+        assert!(!is_wic_heif_name("photo.avif"));
     }
 
     #[test]

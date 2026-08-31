@@ -82,7 +82,7 @@ const PREVHOST_APPID: &str = "{534A1E02-D58F-44f0-B58B-36CBED287C7C}";
 /// File extensions that ArcThumb handles.
 pub const EXTENSIONS: &[&str] = &[
     ".zip", ".cbz", ".rar", ".cbr", ".7z", ".cb7", ".cbt", ".epub", ".fb2", ".mobi", ".azw",
-    ".azw3",
+    ".azw3", ".livp",
 ];
 
 /// Production parent key for shell extension registrations.
@@ -485,6 +485,11 @@ mod tests {
             assert!(ext.starts_with('.'), "{ext} must start with .");
             assert!(ext.len() >= 3, "{ext} too short");
         }
+    }
+
+    #[test]
+    fn livp_is_registered_as_a_shell_extension_target() {
+        assert!(EXTENSIONS.contains(&".livp"));
     }
 
     #[test]
