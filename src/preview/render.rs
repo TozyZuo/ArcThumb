@@ -7,21 +7,24 @@ use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, COLOR_WINDOW, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject,
-    EndPaint, FillRect, GetSysColor, HBITMAP, HBRUSH, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
-    STRETCH_HALFTONE, SelectObject, SetStretchBltMode, StretchBlt,
+    BeginPaint, BitBlt, COLOR_WINDOW, CreateCompatibleDC, CreateSolidBrush, DT_CENTER,
+    DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    FillRect, GetSysColor, HBITMAP, HBRUSH, HGDIOBJ, PAINTSTRUCT, SRCCOPY, STRETCH_HALFTONE,
+    SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_RETURN, VK_SPACE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, DefWindowProcW, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassExW, SetTimer,
-    SetWindowLongPtrW, WM_DESTROY, WM_ERASEBKGND, WM_NCCREATE, WM_PAINT, WM_TIMER, WNDCLASSEXW,
+    SetWindowLongPtrW, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE,
+    WM_PAINT, WM_TIMER, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::bitmap;
 
-use super::ArcThumbPreviewHandler;
+use super::{ArcThumbPreviewHandler, PreviewVideoState, video};
 
 /// Owned HBITMAP wrapper that frees the GDI handle on Drop.
 ///
@@ -103,11 +106,41 @@ unsafe extern "system" fn preview_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     if !ptr.is_null() {
-                        paint(hwnd, &*ptr, false);
+                        let this = &*ptr;
+                        if matches!(
+                            this.video_state(),
+                            PreviewVideoState::Playing | PreviewVideoState::Paused
+                        ) {
+                            validate_video_paint(hwnd, this);
+                        } else {
+                            paint(hwnd, this, false);
+                        }
                     } else {
                         paint_empty(hwnd);
                     }
                 }));
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let _ = SetFocus(Some(hwnd));
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
+                if !ptr.is_null() {
+                    (&*ptr).toggle_video();
+                }
+                LRESULT(0)
+            }
+            WM_KEYDOWN if wparam.0 == VK_SPACE.0 as usize || wparam.0 == VK_RETURN.0 as usize => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
+                if !ptr.is_null() {
+                    (&*ptr).toggle_video();
+                }
+                LRESULT(0)
+            }
+            video::WM_ARCTHUMB_VIDEO_STATE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
+                if !ptr.is_null() {
+                    (&*ptr).handle_video_notice(wparam, lparam);
+                }
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == DEBOUNCE_TIMER_ID => {
@@ -152,6 +185,15 @@ fn paint_empty(hwnd: HWND) {
         let _ = DeleteObject(HGDIOBJ(brush.0));
     }
     let _ = unsafe { EndPaint(hwnd, &ps) };
+}
+
+/// Validate WM_PAINT without drawing over EVR's last frame, then ask the video
+/// renderer to repaint its surface (for example after Explorer was uncovered).
+fn validate_video_paint(hwnd: HWND, this: &ArcThumbPreviewHandler) {
+    let mut ps = PAINTSTRUCT::default();
+    let _ = unsafe { BeginPaint(hwnd, &mut ps) };
+    let _ = unsafe { EndPaint(hwnd, &ps) };
+    this.request_video_repaint();
 }
 
 /// Paint the preview image. When `commit` is true (fired by
@@ -217,7 +259,39 @@ fn paint(hwnd: HWND, this: &ArcThumbPreviewHandler, commit: bool) {
         }
     }
 
+    if let Some(text) = this.video_overlay_text() {
+        draw_video_banner(hdc, &client, text);
+    }
+
     let _ = unsafe { EndPaint(hwnd, &ps) };
+}
+
+fn draw_video_banner(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT, text: &str) {
+    let height = (client.bottom - client.top).clamp(1, 40);
+    let mut banner = RECT {
+        left: client.left,
+        top: client.bottom - height,
+        right: client.right,
+        bottom: client.bottom,
+    };
+    let brush = unsafe { CreateSolidBrush(COLORREF(0x0020_2020)) };
+    unsafe {
+        FillRect(hdc, &banner, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+    }
+    banner.left += 8;
+    banner.right -= 8;
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut banner,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
 }
 
 /// BitBlt a cached bitmap at its native size.

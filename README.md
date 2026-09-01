@@ -24,7 +24,7 @@ No pressure. Starring the repo or sending a clear bug report is worth just as mu
 ## What it does
 
 - Shows the first image (or the cover, if one is identifiable) from an archive as the file's thumbnail in Explorer.
-- Reads the HEIC/HEIF or JPEG still image directly from a `.livp` Apple Live Photo without unpacking it on disk.
+- Reads the HEIC/HEIF or JPEG still image directly from a `.livp` Apple Live Photo without unpacking it on disk, and plays its paired MOV from memory in the preview pane.
 - For ebooks, parses the format-specific metadata so the right cover is picked instead of an arbitrary embedded image. EPUB uses the OPF manifest, FB2 uses the `<coverpage>` reference, and MOBI/AZW/AZW3 use the EXTH 201 CoverOffset record.
 - Implements `IPreviewHandler` so the same cover shows up in Explorer's preview pane (`Alt+P`), rescaled when the splitter moves.
 - Can bake an identification overlay into archive thumbnails — a format-coloured border and a corner label (`CBZ`, `EPUB`, …) — so archives stand out from plain images. Off by default.
@@ -42,7 +42,7 @@ No pressure. Starring the repo or sending a clear bug report is worth just as mu
 | `.rar`, `.cbr` | RAR / Comic Book RAR | |
 | `.7z`, `.cb7`  | 7-Zip / Comic Book 7z | |
 | `.cbt`         | Comic Book TAR | uncompressed tar |
-| `.livp`        | Apple Live Photo | ZIP container; HEIC/HEIF or JPEG still image |
+| `.livp`        | Apple Live Photo | ZIP container; HEIC/HEIF or JPEG still plus MOV playback |
 | `.epub`        | EPUB 2 / EPUB 3 | OPF manifest |
 | `.fb2`         | FictionBook 2 | inline base64 binaries |
 | `.mobi`, `.azw`, `.azw3` | Amazon Kindle | EXTH 201 CoverOffset |
@@ -50,6 +50,12 @@ No pressure. Starring the repo or sending a clear bug report is worth just as mu
 ### Image formats inside archives
 
 JPEG, PNG, GIF, BMP, TIFF, ICO, WebP, HEIC, and HEIF. Each format can be individually enabled or disabled in the configuration GUI. HEIC/HEIF decoding uses Windows Imaging Component (WIC), so a compatible system codec such as `wic_heic` must be installed. AVIF and SVG are not supported.
+
+### LIVP motion playback
+
+Open Explorer's preview pane with `Alt+P`, select a `.livp`, then click the still image or press `Space`/`Enter` to play or pause its MOV. The MOV is read directly from the ZIP container into bounded memory (up to 256 MiB); ArcThumb does not extract a temporary video file.
+
+Playback uses Windows Media Foundation. H.264 MOV clips normally work with the decoder included in Windows 10/11. H.265/HEVC clips require a Media Foundation HEVC decoder, normally [Microsoft HEVC Video Extensions](https://apps.microsoft.com/detail/9NMZLZ57R3T7). The WIC HEIC decoder used for thumbnails, including `wic_heic`, only decodes the still image and does not provide an H.265 video decoder. When HEVC support is missing, ArcThumb keeps showing the still image and displays an installation hint instead of failing the whole preview.
 
 ## Installing
 
@@ -237,11 +243,12 @@ The Inno Setup installer does not write any CLSID keys directly. It runs `arcthu
 ## Known limitations
 
 - HEIC/HEIF requires an installed WIC decoder. If Windows cannot decode the still image, LIVP falls back to the normal file icon.
+- LIVP H.265/HEVC playback requires a system Media Foundation HEVC decoder; `wic_heic` alone is not sufficient. H.264 playback has no additional codec dependency on a normal Windows 10/11 installation.
 - AVIF, SVG, and DjVu are not supported.
 - Animated GIF and animated WebP show only the first frame.
 - Encrypted archives are not supported.
-- Very large archives are skipped by safety limits: ZIP and 7z handle files of any practical size, TAR and RAR are capped at 2 GiB, and image decoding stops at 512 MiB to defend against decompression bombs.
-- The preview pane shows the cover image only. There is no multi-image gallery view.
+- Very large archives are skipped by safety limits: ZIP and 7z handle files of any practical size, TAR and RAR are capped at 2 GiB, LIVP MOV entries are capped at 256 MiB, and image decoding stops at 512 MiB to defend against decompression bombs.
+- The preview pane has no multi-image gallery view; LIVP playback is limited to its paired still image and MOV.
 
 ## License
 

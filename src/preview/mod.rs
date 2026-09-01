@@ -3,8 +3,8 @@
 //! Mirrors the architecture of `com::ArcThumbProvider`, but instead
 //! of returning a single HBITMAP it owns a child window inside
 //! Explorer's preview pane (`Alt+P`) and paints the cover image into
-//! it. The decoder pipeline (archive → first image → decode) is
-//! identical — only the rendering target changes.
+//! it. For LIVP input it can also play the paired MOV through Media
+//! Foundation without extracting it to disk.
 //!
 //! Lifecycle as Explorer / `prevhost.exe` calls it:
 //!
@@ -14,7 +14,8 @@
 //! 4. `IPreviewHandler::SetWindow(parent, rect)` → remember parent + rect
 //! 5. `IPreviewHandler::SetRect(rect)` → resize child window if any
 //! 6. `IPreviewHandler::DoPreview()` → consume the stream, decode the
-//!    cover, create the child window, schedule a paint
+//!    cover (and retain a bounded LIVP MOV), create the child window,
+//!    schedule a paint
 //! 7. (`SetRect` may fire many times during drag-resize. Each one
 //!    moves the child window and invalidates it; the WM_PAINT handler
 //!    re-resizes the cached image.)
@@ -28,13 +29,16 @@
 //! `prevhost.exe` and crash it.
 
 mod render;
+mod video;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use windows::Win32::Foundation::{
-    CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER, HINSTANCE, HWND, RECT, S_FALSE,
+    CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER, HINSTANCE, HWND, LPARAM, RECT,
+    S_FALSE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, IStream};
@@ -42,20 +46,33 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{
     IObjectWithSite, IObjectWithSite_Impl, IOleWindow, IOleWindow_Impl,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_RETURN, VK_SPACE};
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithStream, IInitializeWithStream_Impl,
 };
 use windows::Win32::UI::Shell::{IPreviewHandler, IPreviewHandler_Impl};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GWLP_USERDATA, MSG, MoveWindow, SetParent, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WS_CHILD, WS_VISIBLE,
+    WINDOW_EX_STYLE, WM_KEYDOWN, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
 };
-use windows::core::{BOOL, GUID, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
+use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
 use crate::{alog, archive, decode, settings, stream::ComStreamReader};
 
 use render::CachedBitmap;
+use video::{VideoCodec, VideoPlayer};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PreviewVideoState {
+    #[default]
+    None,
+    Idle,
+    Starting,
+    Playing,
+    Paused,
+    Ended,
+    Error,
+}
 
 // =============================================================================
 // CLSID + class factory
@@ -126,12 +143,22 @@ pub struct ArcThumbPreviewHandler {
     /// Cached HBITMAP at the last drawn (width, height). Replaced on
     /// resize. Freed via `CachedBitmap::Drop`.
     pub(crate) cache: RefCell<Option<CachedBitmap>>,
+    /// Bounded MOV payload extracted from a LIVP. Shared with a playback
+    /// worker without another full-size copy.
+    video_bytes: RefCell<Option<Arc<[u8]>>>,
+    video_codec: Cell<VideoCodec>,
+    video_state: Cell<PreviewVideoState>,
+    video_error: Cell<HRESULT>,
+    video_player: RefCell<Option<VideoPlayer>>,
 }
 
 impl Drop for ArcThumbPreviewHandler {
     /// Safety net: if a host releases us without calling `Unload`,
     /// the child window would leak. We tear it down here too.
     fn drop(&mut self) {
+        if let Some(player) = self.video_player.borrow_mut().take() {
+            player.shutdown();
+        }
         let hwnd = self.child_hwnd.get();
         if !hwnd.is_invalid() {
             unsafe {
@@ -258,6 +285,9 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             }
             let r = unsafe { *prc };
             self.this.rect.set(r);
+            if let Some(player) = self.this.video_player.borrow().as_ref() {
+                player.resize(r.right - r.left, r.bottom - r.top);
+            }
             let child = self.this.child_hwnd.get();
             if !child.is_invalid() {
                 unsafe {
@@ -287,12 +317,34 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                 .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
 
             // 2. Reuse the existing decoder pipeline.
-            let reader = ComStreamReader::new(stream);
-            let (name, bytes) =
-                archive::read_first_image(reader, settings::current()).map_err(|e| {
-                    alog!("Preview: archive read failed: {e}");
-                    windows::core::Error::from_hresult(E_FAIL)
-                })?;
+            let mut reader = ComStreamReader::new(stream);
+            let (name, bytes) = match archive::try_read_livp(&mut reader, settings::current()) {
+                Ok(Some(parts)) => {
+                    alog!(
+                        "Preview: LIVP pair {} + {} ({} video bytes)",
+                        parts.image_name,
+                        parts.video_name,
+                        parts.video_bytes.len()
+                    );
+                    self.this
+                        .video_codec
+                        .set(video::detect_mov_codec(&parts.video_bytes));
+                    *self.this.video_bytes.borrow_mut() =
+                        Some(Arc::from(parts.video_bytes.into_boxed_slice()));
+                    self.this.video_state.set(PreviewVideoState::Idle);
+                    (parts.image_name, parts.image_bytes)
+                }
+                Ok(None) => {
+                    archive::read_first_image(reader, settings::current()).map_err(|e| {
+                        alog!("Preview: archive read failed: {e}");
+                        windows::core::Error::from_hresult(E_FAIL)
+                    })?
+                }
+                Err(e) => {
+                    alog!("Preview: LIVP inspection failed: {e}");
+                    return Err(windows::core::Error::from_hresult(E_FAIL));
+                }
+            };
             let img = decode::decode_with_limits(&name, &bytes).map_err(|e| {
                 alog!("Preview: decode failed: {e}");
                 windows::core::Error::from_hresult(E_FAIL)
@@ -321,6 +373,9 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
     fn Unload(&self) -> Result<()> {
         // Unload must always succeed; swallow any internal failure.
         let _ = guard("Preview::Unload", || {
+            if let Some(player) = self.this.video_player.borrow_mut().take() {
+                player.shutdown();
+            }
             let hwnd = self.this.child_hwnd.replace(HWND::default());
             if !hwnd.is_invalid() {
                 unsafe {
@@ -331,6 +386,10 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             *self.this.cache.borrow_mut() = None;
             *self.this.source.borrow_mut() = None;
             *self.this.stream.borrow_mut() = None;
+            *self.this.video_bytes.borrow_mut() = None;
+            self.this.video_state.set(PreviewVideoState::None);
+            self.this.video_codec.set(VideoCodec::Unknown);
+            self.this.video_error.set(HRESULT(0));
             Ok(())
         });
         Ok(())
@@ -356,8 +415,16 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
         }
     }
 
-    fn TranslateAccelerator(&self, _pmsg: *const MSG) -> Result<()> {
-        // We never intercept accelerators. S_FALSE = "not handled".
+    fn TranslateAccelerator(&self, pmsg: *const MSG) -> Result<()> {
+        if !pmsg.is_null() {
+            let msg = unsafe { &*pmsg };
+            if msg.message == WM_KEYDOWN
+                && (msg.wParam.0 == VK_SPACE.0 as usize || msg.wParam.0 == VK_RETURN.0 as usize)
+            {
+                self.this.toggle_video();
+                return Ok(());
+            }
+        }
         Err(windows::core::Error::from_hresult(S_FALSE))
     }
 }
@@ -395,7 +462,7 @@ impl ArcThumbPreviewHandler_Impl {
                 WINDOW_EX_STYLE(0),
                 PCWSTR(atom as usize as *const u16),
                 w!(""),
-                WS_CHILD | WS_VISIBLE,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 r.left,
                 r.top,
                 width,
@@ -416,5 +483,101 @@ impl ArcThumbPreviewHandler_Impl {
             let _ = InvalidateRect(Some(hwnd), None, true);
         }
         Ok(())
+    }
+}
+
+impl ArcThumbPreviewHandler {
+    pub(crate) fn video_state(&self) -> PreviewVideoState {
+        self.video_state.get()
+    }
+
+    pub(crate) fn video_overlay_text(&self) -> Option<&'static str> {
+        match self.video_state.get() {
+            PreviewVideoState::Idle | PreviewVideoState::Ended => {
+                Some("Click or press Space to play Live Photo")
+            }
+            PreviewVideoState::Starting => Some("Opening Live Photo video..."),
+            PreviewVideoState::Error if self.video_codec.get() == VideoCodec::Hevc => {
+                Some("H.265 unavailable - install Microsoft HEVC Video Extensions")
+            }
+            PreviewVideoState::Error => Some("Live Photo video playback is unavailable"),
+            PreviewVideoState::None | PreviewVideoState::Playing | PreviewVideoState::Paused => {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn request_video_repaint(&self) {
+        if let Some(player) = self.video_player.borrow().as_ref() {
+            player.repaint();
+        }
+    }
+
+    pub(crate) fn toggle_video(&self) {
+        match self.video_state.get() {
+            PreviewVideoState::None | PreviewVideoState::Starting => {}
+            PreviewVideoState::Playing | PreviewVideoState::Paused => {
+                if let Some(player) = self.video_player.borrow().as_ref() {
+                    player.toggle();
+                }
+            }
+            PreviewVideoState::Ended => {
+                self.video_state.set(PreviewVideoState::Starting);
+                unsafe {
+                    let _ = InvalidateRect(Some(self.child_hwnd.get()), None, true);
+                }
+                if let Some(player) = self.video_player.borrow().as_ref() {
+                    player.replay();
+                }
+            }
+            PreviewVideoState::Idle | PreviewVideoState::Error => {
+                if let Some(old) = self.video_player.borrow_mut().take() {
+                    old.shutdown();
+                }
+                let Some(bytes) = self.video_bytes.borrow().as_ref().cloned() else {
+                    return;
+                };
+                let hwnd = self.child_hwnd.get();
+                if hwnd.is_invalid() {
+                    return;
+                }
+                let r = self.rect.get();
+                self.video_state.set(PreviewVideoState::Starting);
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+                match VideoPlayer::start(bytes, hwnd, r.right - r.left, r.bottom - r.top) {
+                    Ok(player) => *self.video_player.borrow_mut() = Some(player),
+                    Err(error) => {
+                        self.video_error.set(error.code());
+                        self.video_state.set(PreviewVideoState::Error);
+                        unsafe {
+                            let _ = InvalidateRect(Some(hwnd), None, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn handle_video_notice(&self, notice: WPARAM, status: LPARAM) {
+        match notice.0 {
+            video::NOTICE_PLAYING => self.video_state.set(PreviewVideoState::Playing),
+            video::NOTICE_PAUSED => self.video_state.set(PreviewVideoState::Paused),
+            video::NOTICE_ENDED => self.video_state.set(PreviewVideoState::Ended),
+            video::NOTICE_FAILED => {
+                self.video_error.set(HRESULT(status.0 as i32));
+                self.video_state.set(PreviewVideoState::Error);
+            }
+            _ => return,
+        }
+        if matches!(
+            self.video_state.get(),
+            PreviewVideoState::Ended | PreviewVideoState::Error
+        ) {
+            unsafe {
+                let _ = InvalidateRect(Some(self.child_hwnd.get()), None, true);
+            }
+        }
     }
 }

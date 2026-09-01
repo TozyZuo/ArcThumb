@@ -4,8 +4,149 @@ use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::ContentKind;
+use super::LivpParts;
 use crate::settings::Settings;
 use crate::{ebook, limits};
+
+#[derive(Debug)]
+struct LivpEntry {
+    index: usize,
+    name: String,
+    size: u64,
+}
+
+/// Pair entries by their complete path without the final extension. LIVP files
+/// exported by Apple use the same basename for the HEIC/JPEG and MOV. Keeping
+/// the directory in the key prevents unrelated `cover.jpg` / `cover.mov`
+/// entries in different folders from being paired accidentally.
+fn livp_pair_key(name: &str) -> String {
+    let normalized = name.replace('\\', "/");
+    normalized
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase()
+}
+
+fn is_mov(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("mov"))
+}
+
+fn choose_livp_pair(
+    images: &[LivpEntry],
+    videos: &[LivpEntry],
+    settings: &Settings,
+) -> Option<(usize, usize)> {
+    let mut paired_images = Vec::new();
+    let mut video_for_image = std::collections::HashMap::new();
+
+    for image in images {
+        let image_key = livp_pair_key(&image.name);
+        if let Some(video) = videos
+            .iter()
+            .find(|video| livp_pair_key(&video.name) == image_key)
+        {
+            paired_images.push((image.index, image.name.clone()));
+            video_for_image.insert(image.index, video.index);
+        }
+    }
+
+    // Some exporters rename one side of the pair. Accept this only when the
+    // archive has exactly one eligible still and one MOV, which remains a
+    // strong LIVP signal without turning general multimedia ZIPs into players.
+    if paired_images.is_empty() && images.len() == 1 && videos.len() == 1 {
+        paired_images.push((images[0].index, images[0].name.clone()));
+        video_for_image.insert(images[0].index, videos[0].index);
+    }
+
+    let (image_index, _) = settings.pick_first_image(paired_images)?;
+    Some((image_index, *video_for_image.get(&image_index)?))
+}
+
+fn read_entry_limited<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    index: usize,
+    limit: u64,
+) -> Result<(String, Vec<u8>), Box<dyn Error>> {
+    let mut entry = archive.by_index(index)?;
+    if entry.size() > limit {
+        return Err(format!(
+            "ZIP entry too large for LIVP preview ({} > {limit})",
+            entry.size()
+        )
+        .into());
+    }
+    let name = entry.name().to_string();
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err("ZIP entry expanded beyond LIVP preview limit".into());
+    }
+    Ok((name, bytes))
+}
+
+pub(super) fn zip_try_read_livp<R: Read + Seek>(
+    mut reader: R,
+    settings: &Settings,
+) -> Result<Option<LivpParts>, Box<dyn Error>> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut archive = zip::ZipArchive::new(reader)?;
+    if archive.len() > limits::MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "archive has too many entries ({} > {} limit)",
+            archive.len(),
+            limits::MAX_ARCHIVE_ENTRIES
+        )
+        .into());
+    }
+
+    let mut images = Vec::new();
+    let mut videos = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if !entry.is_file() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let size = entry.size();
+        if settings.accepts_image_ext(&name) && size <= limits::MAX_ENTRY_SIZE {
+            images.push(LivpEntry { index, name, size });
+        } else if is_mov(&name) && size <= limits::MAX_LIVP_VIDEO_SIZE {
+            videos.push(LivpEntry { index, name, size });
+        }
+    }
+
+    let Some((image_index, video_index)) = choose_livp_pair(&images, &videos, settings) else {
+        return Ok(None);
+    };
+
+    // The preflight sizes above are retained for diagnostics and ensure the
+    // selected pair came from bounded candidates; extraction checks again to
+    // defend against malformed central-directory metadata.
+    debug_assert!(
+        images
+            .iter()
+            .any(|entry| { entry.index == image_index && entry.size <= limits::MAX_ENTRY_SIZE })
+    );
+    debug_assert!(
+        videos.iter().any(|entry| {
+            entry.index == video_index && entry.size <= limits::MAX_LIVP_VIDEO_SIZE
+        })
+    );
+
+    let (image_name, image_bytes) =
+        read_entry_limited(&mut archive, image_index, limits::MAX_ENTRY_SIZE)?;
+    let (video_name, video_bytes) =
+        read_entry_limited(&mut archive, video_index, limits::MAX_LIVP_VIDEO_SIZE)?;
+
+    Ok(Some(LivpParts {
+        image_name,
+        image_bytes,
+        video_name,
+        video_bytes,
+    }))
+}
 
 /// Look for an `.fb2` entry inside an already-opened ZIP archive
 /// (the `.fb2.zip` distribution convention). Returns `None` if no
@@ -116,7 +257,7 @@ pub(super) fn zip_read_first_image<R: Read + Seek>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{read_first_image, tests::make_tiny_png};
+    use super::super::{read_first_image, tests::make_tiny_png, try_read_livp};
     use crate::settings::Settings;
     use std::io::Cursor;
 
@@ -203,6 +344,63 @@ mod tests {
             assert_eq!(selected_name, name);
             assert_eq!(selected_bytes, body);
         }
+    }
+
+    #[test]
+    fn livp_preview_extracts_matching_still_and_mov() {
+        let livp = build_zip(&[
+            ("nested/IMG_0001.MOV", b"QuickTime"),
+            ("nested/IMG_0001.HEIC", b"HEIC"),
+            ("nested/unrelated.jpg", b"JPEG"),
+        ]);
+
+        let parts = try_read_livp(livp, &Settings::default())
+            .expect("LIVP extraction")
+            .expect("paired entries");
+        assert_eq!(parts.image_name, "nested/IMG_0001.HEIC");
+        assert_eq!(parts.image_bytes, b"HEIC");
+        assert_eq!(parts.video_name, "nested/IMG_0001.MOV");
+        assert_eq!(parts.video_bytes, b"QuickTime");
+    }
+
+    #[test]
+    fn livp_preview_matches_case_insensitively_and_backslash_paths() {
+        let livp = build_zip(&[
+            ("DCIM\\Photo.HeIf", b"still"),
+            ("dcim/photo.mOv", b"motion"),
+        ]);
+        let parts = try_read_livp(livp, &Settings::default())
+            .unwrap()
+            .expect("case-insensitive pair");
+        assert_eq!(parts.image_bytes, b"still");
+        assert_eq!(parts.video_bytes, b"motion");
+    }
+
+    #[test]
+    fn livp_preview_accepts_unique_renamed_pair_but_not_ambiguous_zip() {
+        let unique = build_zip(&[("still.jpeg", b"still"), ("motion.mov", b"motion")]);
+        assert!(
+            try_read_livp(unique, &Settings::default())
+                .unwrap()
+                .is_some()
+        );
+
+        let ambiguous = build_zip(&[
+            ("one.jpeg", b"one"),
+            ("two.jpeg", b"two"),
+            ("motion.mov", b"motion"),
+        ]);
+        assert!(
+            try_read_livp(ambiguous, &Settings::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn livp_preview_returns_none_without_mov() {
+        let zip = build_zip(&[("photo.heic", b"still")]);
+        assert!(try_read_livp(zip, &Settings::default()).unwrap().is_none());
     }
 
     /// Hand-build a single-entry stored ZIP whose entry name is the raw

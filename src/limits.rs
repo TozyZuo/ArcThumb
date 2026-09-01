@@ -37,6 +37,14 @@ pub const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 /// spend a minute decoding a 1 GB TIFF.
 pub const MAX_ENTRY_SIZE: u64 = 500 * 1024 * 1024; // 500 MiB
 
+/// Maximum uncompressed MOV payload retained in memory for LIVP preview
+/// playback. Unlike thumbnails, video playback needs random access to the
+/// complete ISO-BMFF stream (the `moov` atom may sit at the end), so the
+/// preview handler buffers the selected MOV entry instead of streaming it
+/// straight from the deflate decoder. 256 MiB is ample for normal 1–3 second
+/// Live Photo clips while keeping `prevhost.exe` memory use bounded.
+pub const MAX_LIVP_VIDEO_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
+
 /// Maximum decoded image dimension (width or height, in pixels).
 /// Enforced via `image::Limits` before full decode.
 pub const MAX_IMAGE_DIMENSION: u32 = 32_768;
@@ -83,4 +91,8 @@ const _: () = {
     // The decoder budget must be at least as large, otherwise a valid
     // small archive entry could still trip the decoder cap.
     assert!(MAX_IMAGE_ALLOC >= MAX_ENTRY_SIZE);
+
+    // A video entry is buffered in full, so it must stay within the broader
+    // per-entry ceiling used while enumerating archive contents.
+    assert!(MAX_LIVP_VIDEO_SIZE <= MAX_ENTRY_SIZE);
 };

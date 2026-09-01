@@ -60,6 +60,43 @@ pub struct Extracted {
     pub kind: ContentKind,
 }
 
+/// The paired still image and motion clip stored in an Apple LIVP ZIP
+/// container. Both payloads are decompressed into memory; no temporary file is
+/// created. The video size is capped by [`limits::MAX_LIVP_VIDEO_SIZE`].
+pub struct LivpParts {
+    pub image_name: String,
+    pub image_bytes: Vec<u8>,
+    pub video_name: String,
+    pub video_bytes: Vec<u8>,
+}
+
+/// If `reader` is a LIVP-like ZIP containing a paired still image and MOV,
+/// return both entries. Ordinary ZIP/CBZ/EPUB input returns `Ok(None)` so the
+/// caller can fall back to the normal cover-image pipeline.
+pub fn try_read_livp<R: Read + Seek>(
+    mut reader: R,
+    settings: &Settings,
+) -> Result<Option<LivpParts>, Box<dyn Error>> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; 4];
+    let read = reader.read(&mut magic)?;
+    if read < magic.len() || detect_format(&magic) != Format::Zip {
+        reader.seek(SeekFrom::Start(0))?;
+        return Ok(None);
+    }
+
+    let total = reader.seek(SeekFrom::End(0))?;
+    if total > limits::MAX_ARCHIVE_SIZE_INDEXED {
+        return Err(format!(
+            "archive too large ({total} bytes > {} limit)",
+            limits::MAX_ARCHIVE_SIZE_INDEXED
+        )
+        .into());
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    zip::zip_try_read_livp(reader, settings)
+}
+
 /// Open an archive stream, pick the first image, return `(name, bytes)`.
 ///
 /// Thin wrapper over [`read_first_image_with_kind`] for callers (the
