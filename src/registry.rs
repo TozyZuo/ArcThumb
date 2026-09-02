@@ -26,6 +26,9 @@
 //!
 //! HK??\Software\Classes\.zip\ShellEx\{IID_IThumbnailProvider}
 //!     (Default)                = "{CLSID_ARCTHUMB}"
+//!
+//! HK??\Software\Microsoft\Windows\CurrentVersion\PreviewHandlers
+//!     {CLSID_ARCTHUMB_PREVIEW} = "ArcThumb Preview Handler"
 //! ```
 //!
 //! ## Two callers
@@ -74,10 +77,15 @@ const IID_ITHUMBNAILPROVIDER: &str = "{E357FCCD-A995-4576-B01F-234630154E96}";
 /// `.<ext>\ShellEx\<this IID>` to find the preview handler.
 const IID_IPREVIEWHANDLER: &str = "{8895B1C6-B41F-4C1C-A562-0D564250836F}";
 
-/// AppID of the standard preview-host surrogate. Setting this on
-/// the CLSID key tells COM to load our DLL inside `prevhost.exe`
-/// (per-user, no admin needed; isolation handled by Windows).
-const PREVHOST_APPID: &str = "{534A1E02-D58F-44f0-B58B-36CBED287C7C}";
+/// AppID of the standard **64-bit** preview-host surrogate. ArcThumb ships
+/// only an x64 shell-extension DLL, so it must not use the alternate
+/// `{534A...}` AppID reserved for 32-bit handlers on 64-bit Windows.
+const PREVHOST_APPID: &str = "{6D2B5079-2F0B-48DD-AB7F-97CEC514D30B}";
+
+/// Windows also requires every preview handler to appear in this global list.
+/// Extension-level ShellEx bindings alone are insufficient for Explorer to
+/// enumerate and launch the handler reliably.
+const PREVIEW_HANDLERS_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers";
 
 /// File extensions that ArcThumb handles.
 pub const EXTENSIONS: &[&str] = &[
@@ -222,8 +230,42 @@ fn unregister_extension_at(root: &RegKey, shellex_path: &str) -> io::Result<()> 
     }
 }
 
+fn register_preview_handler_list_entry_at(
+    root: &RegKey,
+    list_path: &str,
+    clsid_str: &str,
+    display_name: &str,
+) -> io::Result<()> {
+    let (key, _) = root.create_subkey(list_path)?;
+    key.set_value(clsid_str, &display_name)
+}
+
+fn unregister_preview_handler_list_entry_at(
+    root: &RegKey,
+    list_path: &str,
+    clsid_str: &str,
+) -> io::Result<()> {
+    let key = match root.open_subkey_with_flags(list_path, KEY_SET_VALUE) {
+        Ok(key) => key,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match key.delete_value(clsid_str) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn is_subkey_present(root: &RegKey, path: &str) -> bool {
     root.open_subkey(path).is_ok()
+}
+
+fn is_string_value_present(root: &RegKey, path: &str, value_name: &str) -> bool {
+    root.open_subkey(path)
+        .ok()
+        .and_then(|key| key.get_value::<String, _>(value_name).ok())
+        .is_some()
 }
 
 fn read_inproc_default(root: &RegKey, clsid_root: &str) -> Option<PathBuf> {
@@ -341,6 +383,25 @@ pub fn unregister_preview_clsid(scope: Scope) -> io::Result<()> {
     unregister_clsid_at(&scope.root_key(), &PREVIEW.clsid_root())
 }
 
+/// Add ArcThumb to Windows's global preview-handler enumeration list.
+pub fn register_preview_handler_list_entry(scope: Scope) -> io::Result<()> {
+    register_preview_handler_list_entry_at(
+        &scope.root_key(),
+        PREVIEW_HANDLERS_PATH,
+        PREVIEW_CLSID_STR,
+        PREVIEW.display_name,
+    )
+}
+
+/// Remove ArcThumb from Windows's global preview-handler enumeration list.
+pub fn unregister_preview_handler_list_entry(scope: Scope) -> io::Result<()> {
+    unregister_preview_handler_list_entry_at(
+        &scope.root_key(),
+        PREVIEW_HANDLERS_PATH,
+        PREVIEW_CLSID_STR,
+    )
+}
+
 /// Wire one extension to the preview-handler CLSID via its
 /// `IPreviewHandler` ShellEx slot.
 pub fn register_preview_extension(scope: Scope, ext: &str) -> io::Result<()> {
@@ -363,7 +424,7 @@ pub fn is_preview_enabled(scope: Scope) -> bool {
     is_subkey_present(
         &scope.root_key(),
         &format!("{}\\InprocServer32", PREVIEW.clsid_root()),
-    )
+    ) && is_string_value_present(&scope.root_key(), PREVIEW_HANDLERS_PATH, PREVIEW_CLSID_STR)
 }
 
 /// Pick the first scope (in `Scope::ALL` order) where the thumbnail
@@ -385,6 +446,7 @@ pub fn register() -> io::Result<()> {
     let dll_path = Path::new(&dll_path_str);
     register_clsid(scope, dll_path)?;
     register_preview_clsid(scope, dll_path)?;
+    register_preview_handler_list_entry(scope)?;
     for ext in EXTENSIONS {
         register_extension(scope, ext)?;
         register_preview_extension(scope, ext)?;
@@ -402,6 +464,7 @@ pub fn unregister() -> io::Result<()> {
             let _ = unregister_extension(scope, ext);
             let _ = unregister_preview_extension(scope, ext);
         }
+        let _ = unregister_preview_handler_list_entry(scope);
         let _ = unregister_clsid(scope);
         let _ = unregister_preview_clsid(scope);
     }
@@ -623,6 +686,33 @@ mod tests {
 
         unregister_clsid_at(&hkcu(), &clsid_root).expect("unregister");
         assert!(!is_subkey_present(&hkcu(), &clsid_root));
+    }
+
+    #[test]
+    fn preview_handler_list_entry_roundtrip() {
+        let sandbox = unique_sandbox("preview_list");
+        let _guard = SandboxGuard(sandbox.clone());
+        let clsid = "{TEST-PREVIEW-LIST}";
+
+        assert!(!is_string_value_present(&hkcu(), &sandbox, clsid));
+        register_preview_handler_list_entry_at(&hkcu(), &sandbox, clsid, "Test Preview Handler")
+            .expect("register preview-list entry");
+
+        let key = hkcu().open_subkey(&sandbox).expect("open preview list");
+        let display_name: String = key.get_value(clsid).expect("read preview-list entry");
+        assert_eq!(display_name, "Test Preview Handler");
+        assert!(is_string_value_present(&hkcu(), &sandbox, clsid));
+
+        unregister_preview_handler_list_entry_at(&hkcu(), &sandbox, clsid)
+            .expect("unregister preview-list entry");
+        assert!(!is_string_value_present(&hkcu(), &sandbox, clsid));
+        unregister_preview_handler_list_entry_at(&hkcu(), &sandbox, clsid)
+            .expect("missing preview-list entry is a no-op");
+    }
+
+    #[test]
+    fn x64_preview_handler_uses_the_x64_prevhost_appid() {
+        assert_eq!(PREVHOST_APPID, "{6D2B5079-2F0B-48DD-AB7F-97CEC514D30B}");
     }
 
     #[test]

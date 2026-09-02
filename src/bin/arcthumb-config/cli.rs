@@ -33,12 +33,14 @@ pub trait CliOps {
     fn current_scope(&self) -> Scope;
     fn register_clsid(&self, scope: Scope, dll_path: &Path) -> io::Result<()>;
     fn register_preview_clsid(&self, scope: Scope, dll_path: &Path) -> io::Result<()>;
+    fn register_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()>;
     fn register_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()>;
     fn register_preview_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()>;
     fn unregister_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()>;
     fn unregister_preview_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()>;
     fn unregister_clsid(&self, scope: Scope) -> io::Result<()>;
     fn unregister_preview_clsid(&self, scope: Scope) -> io::Result<()>;
+    fn unregister_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()>;
     fn notify_assoc_changed(&self);
 }
 
@@ -57,6 +59,9 @@ impl CliOps for RealCliOps {
     fn register_preview_clsid(&self, scope: Scope, dll_path: &Path) -> io::Result<()> {
         registry::register_preview_clsid(scope, dll_path)
     }
+    fn register_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()> {
+        registry::register_preview_handler_list_entry(scope)
+    }
     fn register_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()> {
         registry::register_extension(scope, ext)
     }
@@ -74,6 +79,9 @@ impl CliOps for RealCliOps {
     }
     fn unregister_preview_clsid(&self, scope: Scope) -> io::Result<()> {
         registry::unregister_preview_clsid(scope)
+    }
+    fn unregister_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()> {
+        registry::unregister_preview_handler_list_entry(scope)
     }
     fn notify_assoc_changed(&self) {
         registry::notify_assoc_changed();
@@ -102,6 +110,9 @@ pub fn run_install(ops: &dyn CliOps) -> i32 {
     if ops.register_preview_clsid(scope, &dll_path).is_err() {
         return EXIT_CLSID_FAILED;
     }
+    if ops.register_preview_handler_list_entry(scope).is_err() {
+        return EXIT_CLSID_FAILED;
+    }
     for &ext in registry::EXTENSIONS {
         if ops.register_extension(scope, ext).is_err() {
             return EXIT_EXTENSION_FAILED;
@@ -127,6 +138,7 @@ pub fn run_uninstall(ops: &dyn CliOps) -> i32 {
             let _ = ops.unregister_extension(scope, ext);
             let _ = ops.unregister_preview_extension(scope, ext);
         }
+        let _ = ops.unregister_preview_handler_list_entry(scope);
         let _ = ops.unregister_clsid(scope);
         let _ = ops.unregister_preview_clsid(scope);
     }
@@ -207,6 +219,12 @@ mod tests {
         fn register_preview_clsid(&self, scope: Scope, _dll_path: &Path) -> io::Result<()> {
             self.record(format!("register_preview_clsid:{}", tag(scope)))
         }
+        fn register_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()> {
+            self.record(format!(
+                "register_preview_handler_list_entry:{}",
+                tag(scope)
+            ))
+        }
         fn register_extension(&self, scope: Scope, ext: &'static str) -> io::Result<()> {
             self.record(format!("register_extension:{}:{ext}", tag(scope)))
         }
@@ -225,6 +243,12 @@ mod tests {
         fn unregister_preview_clsid(&self, scope: Scope) -> io::Result<()> {
             self.record(format!("unregister_preview_clsid:{}", tag(scope)))
         }
+        fn unregister_preview_handler_list_entry(&self, scope: Scope) -> io::Result<()> {
+            self.record(format!(
+                "unregister_preview_handler_list_entry:{}",
+                tag(scope)
+            ))
+        }
         fn notify_assoc_changed(&self) {
             *self.notify_called.borrow_mut() = true;
         }
@@ -239,15 +263,16 @@ mod tests {
         assert!(*ops.notify_called.borrow());
 
         let calls = ops.calls.borrow();
-        // Both CLSIDs first, in thumbnail → preview order.
+        // Both CLSIDs and the global preview-handler list entry first.
         assert_eq!(calls[0], "register_clsid:user");
         assert_eq!(calls[1], "register_preview_clsid:user");
+        assert_eq!(calls[2], "register_preview_handler_list_entry:user");
         // Then thumbnail + preview bindings for every extension.
-        assert_eq!(calls.len(), 2 + registry::EXTENSIONS.len() * 2);
+        assert_eq!(calls.len(), 3 + registry::EXTENSIONS.len() * 2);
         for (i, &ext) in registry::EXTENSIONS.iter().enumerate() {
-            assert_eq!(calls[2 + i * 2], format!("register_extension:user:{ext}"));
+            assert_eq!(calls[3 + i * 2], format!("register_extension:user:{ext}"));
             assert_eq!(
-                calls[3 + i * 2],
+                calls[4 + i * 2],
                 format!("register_preview_extension:user:{ext}")
             );
         }
@@ -290,13 +315,21 @@ mod tests {
     }
 
     #[test]
+    fn install_returns_3_when_preview_handler_list_registration_fails() {
+        let ops = MockCliOps::new().fail_on("register_preview_handler_list_entry:user");
+        assert_eq!(run_install(&ops), EXIT_CLSID_FAILED);
+        assert_eq!(ops.calls.borrow().len(), 3);
+        assert!(!*ops.notify_called.borrow());
+    }
+
+    #[test]
     fn install_returns_4_when_an_extension_binding_fails() {
         let ext = registry::EXTENSIONS[2];
         let ops = MockCliOps::new().fail_on(&format!("register_extension:user:{ext}"));
         assert_eq!(run_install(&ops), EXIT_EXTENSION_FAILED);
-        // Stops at the failing extension: both CLSIDs, two full
+        // Stops at the failing extension: both CLSIDs, preview list, two full
         // extensions before it, then the failing call itself.
-        assert_eq!(ops.calls.borrow().len(), 2 + 2 * 2 + 1);
+        assert_eq!(ops.calls.borrow().len(), 3 + 2 * 2 + 1);
         assert!(!*ops.notify_called.borrow());
     }
 
@@ -317,15 +350,16 @@ mod tests {
         assert!(*ops.notify_called.borrow());
 
         let calls = ops.calls.borrow();
-        // Per scope: thumbnail + preview unbind per extension, then
-        // both CLSID removals. Machine first (Scope::ALL order).
-        let per_scope = registry::EXTENSIONS.len() * 2 + 2;
+        // Per scope: thumbnail + preview unbind per extension, then global
+        // preview-list and both CLSID removals. Machine first.
+        let per_scope = registry::EXTENSIONS.len() * 2 + 3;
         assert_eq!(calls.len(), per_scope * 2);
         assert!(calls[..per_scope].iter().all(|c| c.contains(":machine")));
         assert!(calls[per_scope..].iter().all(|c| c.contains(":user")));
         for scope in ["machine", "user"] {
             assert!(calls.contains(&format!("unregister_clsid:{scope}")));
             assert!(calls.contains(&format!("unregister_preview_clsid:{scope}")));
+            assert!(calls.contains(&format!("unregister_preview_handler_list_entry:{scope}")));
             for &ext in registry::EXTENSIONS {
                 assert!(calls.contains(&format!("unregister_extension:{scope}:{ext}")));
                 assert!(calls.contains(&format!("unregister_preview_extension:{scope}:{ext}")));
@@ -346,6 +380,9 @@ mod tests {
             ops.fail_on
                 .borrow_mut()
                 .push(format!("unregister_preview_clsid:{scope}"));
+            ops.fail_on
+                .borrow_mut()
+                .push(format!("unregister_preview_handler_list_entry:{scope}"));
             for &ext in registry::EXTENSIONS {
                 ops.fail_on
                     .borrow_mut()
@@ -356,7 +393,7 @@ mod tests {
             }
         }
         assert_eq!(run_uninstall(&ops), EXIT_OK);
-        let per_scope = registry::EXTENSIONS.len() * 2 + 2;
+        let per_scope = registry::EXTENSIONS.len() * 2 + 3;
         assert_eq!(ops.calls.borrow().len(), per_scope * 2, "nothing skipped");
         assert!(*ops.notify_called.borrow());
     }

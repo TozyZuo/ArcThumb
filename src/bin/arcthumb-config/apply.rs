@@ -155,6 +155,7 @@ impl RegistryOps for RealRegistryOps {
     fn enable_preview(&self) -> std::io::Result<()> {
         let dll = dll_path::resolve_dll_path().map_err(std::io::Error::other)?;
         registry::register_preview_clsid(self.scope, &dll)?;
+        registry::register_preview_handler_list_entry(self.scope)?;
         for ext in registry::EXTENSIONS {
             registry::register_preview_extension(self.scope, ext)?;
         }
@@ -171,6 +172,9 @@ impl RegistryOps for RealRegistryOps {
             if let Err(e) = registry::unregister_preview_extension(self.scope, ext) {
                 first_err.get_or_insert(e);
             }
+        }
+        if let Err(e) = registry::unregister_preview_handler_list_entry(self.scope) {
+            first_err.get_or_insert(e);
         }
         if let Err(e) = registry::unregister_preview_clsid(self.scope) {
             first_err.get_or_insert(e);
