@@ -143,6 +143,13 @@ unsafe extern "system" fn preview_wnd_proc(
                 }
                 LRESULT(0)
             }
+            super::load::WM_ARCTHUMB_LOAD_COMPLETE => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
+                if !ptr.is_null() {
+                    (&*ptr).handle_load_complete(wparam);
+                }
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == DEBOUNCE_TIMER_ID => {
                 let _ = KillTimer(Some(hwnd), DEBOUNCE_TIMER_ID);
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;

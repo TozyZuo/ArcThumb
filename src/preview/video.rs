@@ -8,9 +8,11 @@
 
 use std::ffi::c_void;
 use std::ops::Deref;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, RECT, WPARAM};
@@ -73,7 +75,6 @@ enum PlayerCommand {
     Replay,
     Resize(i32, i32),
     Repaint,
-    Shutdown,
 }
 
 /// Media Foundation requires an explicit `Shutdown` before the final release.
@@ -119,13 +120,24 @@ impl Drop for MediaSessionGuard {
 /// stay on the worker thread; the preview handler communicates through a
 /// channel so COM apartment ownership remains straightforward.
 pub(super) struct VideoPlayer {
-    commands: Sender<PlayerCommand>,
-    worker: Option<JoinHandle<()>>,
+    commands: SyncSender<PlayerCommand>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl VideoPlayer {
-    pub(super) fn start(bytes: Arc<[u8]>, hwnd: HWND, width: i32, height: i32) -> Result<Self> {
-        let (commands, receiver) = mpsc::channel();
+    pub(super) fn start(
+        bytes: Arc<[u8]>,
+        hwnd: HWND,
+        width: i32,
+        height: i32,
+        token: u32,
+    ) -> Result<Self> {
+        // Resize/repaint are advisory and can arrive much faster than a codec
+        // consumes them. A bounded queue plus try_send prevents either memory
+        // growth or UI-thread blocking while Explorer is being resized.
+        let (commands, receiver) = mpsc::sync_channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
         let hwnd_value = hwnd.0 as isize;
         let worker = thread::Builder::new()
             .name("arcthumb-livp-video".to_string())
@@ -134,58 +146,84 @@ impl VideoPlayer {
                 // process-global but its typed wrapper contains a raw pointer
                 // and is intentionally not moved between Rust threads.
                 let hwnd = HWND(hwnd_value as *mut c_void);
-                if let Err(error) = run_worker(bytes, hwnd, width, height, receiver) {
-                    alog!("LIVP video playback failed: {error}");
-                    post_notice(hwnd, NOTICE_FAILED, error.code());
+                match catch_unwind(AssertUnwindSafe(|| {
+                    run_worker(bytes, hwnd, width, height, receiver, token, worker_shutdown)
+                })) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        alog!("LIVP video playback failed: {error}");
+                        post_notice(hwnd, NOTICE_FAILED, error.code(), token);
+                    }
+                    Err(_) => {
+                        alog!("PANIC caught in LIVP video worker");
+                        post_notice(hwnd, NOTICE_FAILED, E_FAIL, token);
+                    }
                 }
             })
             .map_err(|_| Error::from_hresult(E_FAIL))?;
-        Ok(Self {
-            commands,
-            worker: Some(worker),
-        })
+        // Dropping a Rust JoinHandle detaches the thread. Media Foundation
+        // shutdown remains the worker's responsibility; Explorer's UI thread
+        // must never join a codec/resolver thread because those components are
+        // third-party and may block indefinitely.
+        drop(worker);
+        Ok(Self { commands, shutdown })
     }
 
     pub(super) fn toggle(&self) {
-        let _ = self.commands.send(PlayerCommand::Toggle);
+        let _ = self.commands.try_send(PlayerCommand::Toggle);
     }
 
     pub(super) fn replay(&self) {
-        let _ = self.commands.send(PlayerCommand::Replay);
+        let _ = self.commands.try_send(PlayerCommand::Replay);
     }
 
     pub(super) fn resize(&self, width: i32, height: i32) {
-        let _ = self.commands.send(PlayerCommand::Resize(width, height));
+        let _ = self.commands.try_send(PlayerCommand::Resize(width, height));
     }
 
     pub(super) fn repaint(&self) {
-        let _ = self.commands.send(PlayerCommand::Repaint);
+        let _ = self.commands.try_send(PlayerCommand::Repaint);
     }
 
-    pub(super) fn shutdown(mut self) {
-        let _ = self.commands.send(PlayerCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+    pub(super) fn shutdown(self) {
+        drop(self);
     }
 }
 
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
-        let _ = self.commands.send(PlayerCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        self.shutdown.store(true, Ordering::Release);
+    }
+}
+
+static NEXT_PLAYER_TOKEN: AtomicU32 = AtomicU32::new(1);
+
+pub(super) fn next_player_token() -> u32 {
+    loop {
+        let token = NEXT_PLAYER_TOKEN.fetch_add(1, Ordering::Relaxed);
+        if token != 0 {
+            return token;
         }
     }
 }
 
-fn post_notice(hwnd: HWND, notice: usize, status: HRESULT) {
+fn pack_notice_status(token: u32, status: HRESULT) -> LPARAM {
+    let packed = ((token as u64) << 32) | status.0 as u32 as u64;
+    LPARAM(packed as isize)
+}
+
+pub(super) fn unpack_notice_status(value: LPARAM) -> (u32, HRESULT) {
+    let packed = value.0 as u64;
+    ((packed >> 32) as u32, HRESULT(packed as u32 as i32))
+}
+
+fn post_notice(hwnd: HWND, notice: usize, status: HRESULT, token: u32) {
     unsafe {
         let _ = PostMessageW(
             Some(hwnd),
             WM_ARCTHUMB_VIDEO_STATE,
             WPARAM(notice),
-            LPARAM(status.0 as isize),
+            pack_notice_status(token, status),
         );
     }
 }
@@ -196,24 +234,32 @@ fn run_worker(
     width: i32,
     height: i32,
     receiver: Receiver<PlayerCommand>,
+    token: u32,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
-    let coinit = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    coinit.ok()?;
-
-    let startup = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) };
-    if let Err(error) = startup {
-        unsafe { CoUninitialize() };
-        return Err(error);
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
+    struct ComApartment;
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
     }
+    let _apartment = ComApartment;
 
-    // Keep all COM/MF objects inside this call so they are dropped before
-    // MFShutdown and CoUninitialize below.
-    let result = run_worker_initialized(bytes, hwnd, width, height, receiver);
-    unsafe {
-        let _ = MFShutdown();
-        CoUninitialize();
+    unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }?;
+    struct MediaFoundationRuntime;
+    impl Drop for MediaFoundationRuntime {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = MFShutdown();
+            }
+        }
     }
-    result
+    let _media_foundation = MediaFoundationRuntime;
+
+    // Guard declaration order ensures Media Foundation shuts down before the
+    // COM apartment on success, error, and panic alike.
+    run_worker_initialized(bytes, hwnd, width, height, receiver, token, &shutdown)
 }
 
 fn run_worker_initialized(
@@ -222,6 +268,8 @@ fn run_worker_initialized(
     width: i32,
     height: i32,
     receiver: Receiver<PlayerCommand>,
+    token: u32,
+    shutdown: &AtomicBool,
 ) -> Result<()> {
     let stream = unsafe { SHCreateMemStream(Some(bytes.as_ref())) }
         .ok_or_else(|| Error::from_hresult(E_FAIL))?;
@@ -240,8 +288,14 @@ fn run_worker_initialized(
             &mut object,
         )?;
     }
+    if shutdown.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let source = MediaSourceGuard(object.ok_or_else(|| Error::from_hresult(E_FAIL))?.cast()?);
     let topology = create_playback_topology(&source, hwnd)?;
+    if shutdown.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let session = MediaSessionGuard(unsafe { MFCreateMediaSession(None) }?);
     unsafe { session.SetTopology(0, &topology)? };
 
@@ -250,15 +304,12 @@ fn run_worker_initialized(
     let mut playing = false;
     let mut ended = false;
     let mut current_size = (width.max(1), height.max(1));
-    let mut shutdown_requested = false;
-
-    while !shutdown_requested {
+    while !shutdown.load(Ordering::Acquire) {
         match receiver.recv_timeout(Duration::from_millis(12)) {
-            Ok(PlayerCommand::Shutdown) => shutdown_requested = true,
             Ok(PlayerCommand::Toggle) if topology_ready && playing => {
                 unsafe { session.Pause()? };
                 playing = false;
-                post_notice(hwnd, NOTICE_PAUSED, HRESULT(0));
+                post_notice(hwnd, NOTICE_PAUSED, HRESULT(0), token);
             }
             Ok(PlayerCommand::Toggle) if topology_ready => {
                 let start = if ended {
@@ -269,14 +320,14 @@ fn run_worker_initialized(
                 unsafe { session.Start(std::ptr::null(), &start)? };
                 playing = true;
                 ended = false;
-                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0));
+                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
             }
             Ok(PlayerCommand::Replay) if topology_ready => {
                 let start = PROPVARIANT::from(0i64);
                 unsafe { session.Start(std::ptr::null(), &start)? };
                 playing = true;
                 ended = false;
-                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0));
+                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
             }
             Ok(PlayerCommand::Resize(width, height)) => {
                 current_size = (width.max(1), height.max(1));
@@ -290,7 +341,7 @@ fn run_worker_initialized(
                 }
             }
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => shutdown_requested = true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
         loop {
@@ -318,12 +369,12 @@ fn run_worker_initialized(
                     let start = PROPVARIANT::default();
                     unsafe { session.Start(std::ptr::null(), &start)? };
                     playing = true;
-                    post_notice(hwnd, NOTICE_PLAYING, HRESULT(0));
+                    post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
                 }
             } else if event_type == MEEndOfPresentation.0 as u32 {
                 playing = false;
                 ended = true;
-                post_notice(hwnd, NOTICE_ENDED, HRESULT(0));
+                post_notice(hwnd, NOTICE_ENDED, HRESULT(0), token);
             }
         }
     }
@@ -462,5 +513,12 @@ mod tests {
     #[test]
     fn hevc_hint_wins_if_multiple_tags_exist() {
         assert_eq!(detect_mov_codec(b"avc1 metadata hvc1"), VideoCodec::Hevc);
+    }
+
+    #[test]
+    fn notice_status_roundtrips_token_and_hresult() {
+        let status = HRESULT(0x8000_4005u32 as i32);
+        let packed = pack_notice_status(0x1234_5678, status);
+        assert_eq!(unpack_notice_status(packed), (0x1234_5678, status));
     }
 }

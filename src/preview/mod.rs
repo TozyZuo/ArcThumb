@@ -13,21 +13,23 @@
 //! 3. `IObjectWithSite::SetSite(site)` → stash (we never call back)
 //! 4. `IPreviewHandler::SetWindow(parent, rect)` → remember parent + rect
 //! 5. `IPreviewHandler::SetRect(rect)` → resize child window if any
-//! 6. `IPreviewHandler::DoPreview()` → consume the stream, decode the
-//!    cover (and retain a bounded LIVP MOV), create the child window,
-//!    schedule a paint
-//! 7. (`SetRect` may fire many times during drag-resize. Each one
+//! 6. `IPreviewHandler::DoPreview()` → create the child window, marshal
+//!    the stream to a cancellable loader thread, and return promptly
+//! 7. The loader posts its decoded cover (and bounded LIVP MOV) back to
+//!    the child window, which stores the result and schedules a paint
+//! 8. (`SetRect` may fire many times during drag-resize. Each one
 //!    moves the child window and invalidates it; the WM_PAINT handler
 //!    re-resizes the cached image.)
-//! 8. `IPreviewHandler::Unload()` → destroy the child window, drop
-//!    cached state
-//! 9. `Release()` → eventually drops the impl struct, which destroys
+//! 9. `IPreviewHandler::Unload()` → cancel without waiting, destroy the
+//!    child window, and drop cached state
+//! 10. `Release()` → eventually drops the impl struct, which destroys
 //!    any window we still own (safety net for hosts that skip Unload)
 //!
 //! Every COM entry point is wrapped in `catch_unwind` so a panic in
 //! the decoder, GDI, or our own code can never escape into
 //! `prevhost.exe` and crash it.
 
+mod load;
 mod render;
 mod video;
 
@@ -57,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
-use crate::{alog, archive, decode, settings, stream::ComStreamReader};
+use crate::{alog, limits};
 
 use render::CachedBitmap;
 use video::{VideoCodec, VideoPlayer};
@@ -71,6 +73,7 @@ pub(crate) enum PreviewVideoState {
     Playing,
     Paused,
     Ended,
+    LoadError,
     Error,
 }
 
@@ -150,14 +153,24 @@ pub struct ArcThumbPreviewHandler {
     video_state: Cell<PreviewVideoState>,
     video_error: Cell<HRESULT>,
     video_player: RefCell<Option<VideoPlayer>>,
+    /// Identifies the current detached playback worker. Late messages from a
+    /// worker belonging to an already-unloaded/reused HWND are ignored.
+    video_token: Cell<u32>,
+    /// Result slot owned jointly with the detached loader. Unload cancels and
+    /// drops our reference without ever waiting for a codec or archive parser.
+    load_slot: RefCell<Option<Arc<load::LoadSlot>>>,
 }
 
 impl Drop for ArcThumbPreviewHandler {
     /// Safety net: if a host releases us without calling `Unload`,
     /// the child window would leak. We tear it down here too.
     fn drop(&mut self) {
-        if let Some(player) = self.video_player.borrow_mut().take() {
+        if let Some(player) = self.video_player.get_mut().take() {
+            self.video_token.set(0);
             player.shutdown();
+        }
+        if let Some(slot) = self.load_slot.get_mut().take() {
+            slot.cancel();
         }
         let hwnd = self.child_hwnd.get();
         if !hwnd.is_invalid() {
@@ -316,55 +329,31 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                 .take()
                 .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
 
-            // 2. Reuse the existing decoder pipeline.
-            let mut reader = ComStreamReader::new(stream);
-            let (name, bytes) = match archive::try_read_livp(&mut reader, settings::current()) {
-                Ok(Some(parts)) => {
-                    alog!(
-                        "Preview: LIVP pair {} + {} ({} video bytes)",
-                        parts.image_name,
-                        parts.video_name,
-                        parts.video_bytes.len()
-                    );
-                    self.this
-                        .video_codec
-                        .set(video::detect_mov_codec(&parts.video_bytes));
-                    *self.this.video_bytes.borrow_mut() =
-                        Some(Arc::from(parts.video_bytes.into_boxed_slice()));
-                    self.this.video_state.set(PreviewVideoState::Idle);
-                    (parts.image_name, parts.image_bytes)
-                }
-                Ok(None) => {
-                    archive::read_first_image(reader, settings::current()).map_err(|e| {
-                        alog!("Preview: archive read failed: {e}");
-                        windows::core::Error::from_hresult(E_FAIL)
-                    })?
-                }
-                Err(e) => {
-                    alog!("Preview: LIVP inspection failed: {e}");
-                    return Err(windows::core::Error::from_hresult(E_FAIL));
-                }
-            };
-            let img = decode::decode_with_limits(&name, &bytes).map_err(|e| {
-                alog!("Preview: decode failed: {e}");
-                windows::core::Error::from_hresult(E_FAIL)
-            })?;
-            alog!(
-                "Preview: decoded {}x{} from {}",
-                img.width(),
-                img.height(),
-                name
-            );
-            *self.this.source.borrow_mut() = Some(img);
-
-            // 3. Create the child window if we don't have one yet.
+            // 2. Create the child window before starting potentially slow
+            // archive/WIC work. DoPreview runs on prevhost's UI thread and
+            // must return promptly even if a third-party codec stalls.
             if self.this.child_hwnd.get().is_invalid() {
                 self.create_child_window()?;
-            } else {
-                // Re-use existing window — just trigger a repaint.
-                unsafe {
-                    let _ = InvalidateRect(Some(self.this.child_hwnd.get()), None, true);
-                }
+            }
+
+            // 3. Marshal Explorer's stream to a detached worker apartment.
+            // No Unload/Drop path joins that worker, so Explorer can always
+            // switch files or close the preview pane immediately.
+            if let Some(old) = self.this.load_slot.borrow_mut().take() {
+                old.cancel();
+            }
+            let r = self.this.rect.get();
+            let target_px = (r.right - r.left)
+                .max(r.bottom - r.top)
+                .max(1)
+                .min(limits::MAX_THUMBNAIL_SIZE as i32) as u32;
+            let slot = load::start(stream, self.this.child_hwnd.get(), target_px).map_err(|e| {
+                alog!("Preview: could not start asynchronous load: {e}");
+                windows::core::Error::from_hresult(E_FAIL)
+            })?;
+            *self.this.load_slot.borrow_mut() = Some(slot);
+            unsafe {
+                let _ = InvalidateRect(Some(self.this.child_hwnd.get()), None, true);
             }
             Ok(())
         })
@@ -374,7 +363,11 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
         // Unload must always succeed; swallow any internal failure.
         let _ = guard("Preview::Unload", || {
             if let Some(player) = self.this.video_player.borrow_mut().take() {
+                self.this.video_token.set(0);
                 player.shutdown();
+            }
+            if let Some(slot) = self.this.load_slot.borrow_mut().take() {
+                slot.cancel();
             }
             let hwnd = self.this.child_hwnd.replace(HWND::default());
             if !hwnd.is_invalid() {
@@ -492,11 +485,15 @@ impl ArcThumbPreviewHandler {
     }
 
     pub(crate) fn video_overlay_text(&self) -> Option<&'static str> {
+        if self.load_slot.borrow().is_some() && self.source.borrow().is_none() {
+            return Some("Loading preview...");
+        }
         match self.video_state.get() {
             PreviewVideoState::Idle | PreviewVideoState::Ended => {
                 Some("Click or press Space to play Live Photo")
             }
             PreviewVideoState::Starting => Some("Opening Live Photo video..."),
+            PreviewVideoState::LoadError => Some("Preview is unavailable"),
             PreviewVideoState::Error if self.video_codec.get() == VideoCodec::Hevc => {
                 Some("H.265 unavailable - install Microsoft HEVC Video Extensions")
             }
@@ -504,6 +501,41 @@ impl ArcThumbPreviewHandler {
             PreviewVideoState::None | PreviewVideoState::Playing | PreviewVideoState::Paused => {
                 None
             }
+        }
+    }
+
+    pub(crate) fn handle_load_complete(&self, token: WPARAM) {
+        let token = token.0 as u32;
+        let is_current = self
+            .load_slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|slot| slot.token() == token);
+        if token == 0 || !is_current {
+            return;
+        }
+        let Some(slot) = self.load_slot.borrow_mut().take() else {
+            return;
+        };
+        match slot.take_outcome() {
+            Some(load::LoadOutcome::Ready(loaded)) => {
+                *self.source.borrow_mut() = Some(loaded.image);
+                *self.video_bytes.borrow_mut() = loaded.video_bytes;
+                self.video_codec.set(loaded.video_codec);
+                self.video_state
+                    .set(if self.video_bytes.borrow().is_some() {
+                        PreviewVideoState::Idle
+                    } else {
+                        PreviewVideoState::None
+                    });
+            }
+            Some(load::LoadOutcome::Failed) => {
+                self.video_state.set(PreviewVideoState::LoadError);
+            }
+            None => return,
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(self.child_hwnd.get()), None, true);
         }
     }
 
@@ -515,7 +547,9 @@ impl ArcThumbPreviewHandler {
 
     pub(crate) fn toggle_video(&self) {
         match self.video_state.get() {
-            PreviewVideoState::None | PreviewVideoState::Starting => {}
+            PreviewVideoState::None
+            | PreviewVideoState::Starting
+            | PreviewVideoState::LoadError => {}
             PreviewVideoState::Playing | PreviewVideoState::Paused => {
                 if let Some(player) = self.video_player.borrow().as_ref() {
                     player.toggle();
@@ -532,6 +566,7 @@ impl ArcThumbPreviewHandler {
             }
             PreviewVideoState::Idle | PreviewVideoState::Error => {
                 if let Some(old) = self.video_player.borrow_mut().take() {
+                    self.video_token.set(0);
                     old.shutdown();
                 }
                 let Some(bytes) = self.video_bytes.borrow().as_ref().cloned() else {
@@ -546,9 +581,12 @@ impl ArcThumbPreviewHandler {
                 unsafe {
                     let _ = InvalidateRect(Some(hwnd), None, true);
                 }
-                match VideoPlayer::start(bytes, hwnd, r.right - r.left, r.bottom - r.top) {
+                let token = video::next_player_token();
+                self.video_token.set(token);
+                match VideoPlayer::start(bytes, hwnd, r.right - r.left, r.bottom - r.top, token) {
                     Ok(player) => *self.video_player.borrow_mut() = Some(player),
                     Err(error) => {
+                        self.video_token.set(0);
                         self.video_error.set(error.code());
                         self.video_state.set(PreviewVideoState::Error);
                         unsafe {
@@ -561,12 +599,16 @@ impl ArcThumbPreviewHandler {
     }
 
     pub(crate) fn handle_video_notice(&self, notice: WPARAM, status: LPARAM) {
+        let (token, status) = video::unpack_notice_status(status);
+        if token == 0 || token != self.video_token.get() {
+            return;
+        }
         match notice.0 {
             video::NOTICE_PLAYING => self.video_state.set(PreviewVideoState::Playing),
             video::NOTICE_PAUSED => self.video_state.set(PreviewVideoState::Paused),
             video::NOTICE_ENDED => self.video_state.set(PreviewVideoState::Ended),
             video::NOTICE_FAILED => {
-                self.video_error.set(HRESULT(status.0 as i32));
+                self.video_error.set(status);
                 self.video_state.set(PreviewVideoState::Error);
             }
             _ => return,
