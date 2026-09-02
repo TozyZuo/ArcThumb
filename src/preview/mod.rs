@@ -23,7 +23,7 @@
 //! 9. `IPreviewHandler::Unload()` → cancel without waiting, destroy the
 //!    child window, and drop cached state
 //! 10. `Release()` → eventually drops the impl struct, which destroys
-//!    any window we still own (safety net for hosts that skip Unload)
+//!     any window we still own (safety net for hosts that skip Unload)
 //!
 //! Every COM entry point is wrapped in `catch_unwind` so a panic in
 //! the decoder, GDI, or our own code can never escape into
@@ -59,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
-use crate::{alog, limits};
+use crate::limits;
 
 use render::CachedBitmap;
 use video::{VideoCodec, VideoPlayer};

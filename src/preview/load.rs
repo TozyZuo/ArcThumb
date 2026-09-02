@@ -24,7 +24,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninit
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{Error, Interface, Result};
 
-use crate::{alog, archive, decode, settings, stream::ComStreamReader};
+use crate::{archive, decode, settings, stream::ComStreamReader};
 
 use super::video::{self, VideoCodec};
 
@@ -105,9 +105,8 @@ impl Drop for MarshalledStream {
 /// Start loading and return immediately.  The only synchronous COM work is
 /// creating the standard inter-thread marshal packet.
 pub(super) fn start(stream: IStream, hwnd: HWND, target_px: u32) -> Result<Arc<LoadSlot>> {
-    let permit = LoaderPermit::acquire().map_err(|error| {
+    let permit = LoaderPermit::acquire().inspect_err(|_| {
         alog!("Preview: refusing to start more than {MAX_ACTIVE_LOADERS} loader threads");
-        error
     })?;
     let marshalled = unsafe { CoMarshalInterThreadInterfaceInStream(&IStream::IID, &stream) }?;
     let marshalled = MarshalledStream(Some(marshalled));
@@ -382,9 +381,10 @@ mod tests {
         let stream = unsafe { SHCreateMemStream(Some(&bytes)) }.unwrap();
         let marshalled =
             unsafe { CoMarshalInterThreadInterfaceInStream(&IStream::IID, &stream) }.unwrap();
+        let marshalled = MarshalledStream(Some(marshalled));
         let loaded = thread::spawn(move || {
             let slot = LoadSlot::new(1);
-            load_preview(MarshalledStream(Some(marshalled)), &slot, 256).unwrap()
+            load_preview(marshalled, &slot, 256).unwrap()
         })
         .join()
         .unwrap();

@@ -35,8 +35,6 @@ use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{BOOL, Error, HRESULT, Interface, Result, w};
 
-use crate::alog;
-
 /// Private messages sent from the Media Foundation worker back to the preview
 /// window. `WPARAM` carries one of the `NOTICE_*` values and `LPARAM` carries an
 /// HRESULT for failure notifications.
