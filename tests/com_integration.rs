@@ -30,7 +30,7 @@ use std::io::Cursor;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::{FreeLibrary, HINSTANCE, HMODULE, HWND, RECT, S_OK};
+use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, RECT, S_OK};
 use windows::Win32::Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW, HBITMAP, HGDIOBJ};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, IClassFactory, IStream,
@@ -153,16 +153,15 @@ fn make_test_zip() -> Vec<u8> {
     buf
 }
 
-/// RAII guard that calls `FreeLibrary` on drop, so a panicking test
-/// doesn't leak the loaded DLL handle.
-struct LoadedDll(HMODULE);
-impl Drop for LoadedDll {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = FreeLibrary(self.0);
-        }
-    }
-}
+/// Keeps the DLL loaded for the lifetime of the test process.
+///
+/// This intentionally does not call `FreeLibrary`: ArcThumb's
+/// `DllCanUnloadNow` returns `S_FALSE`, so a real COM host retains the module.
+/// More importantly, preview `Unload` is deliberately non-blocking and its
+/// cancelled loader can still be winding down. Unloading executable code from
+/// underneath that worker would make this test manufacture an access violation
+/// that Explorer cannot produce while honouring `DllCanUnloadNow`.
+struct LoadedDll(#[allow(dead_code)] HMODULE);
 
 /// RAII wrapper that calls `CoUninitialize` on drop.
 struct ComApartment;
