@@ -43,7 +43,19 @@ jobs:
         run: cargo clippy --all-targets
 
       - name: Test
-        run: cargo test
+        shell: pwsh
+        run: |
+          cargo test 2>&1 | Tee-Object -FilePath test-output.txt
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            # Public fork logs require a signed-in GitHub session. Put the
+            # useful tail in the check annotation as well so a failed test is
+            # diagnosable through the checks API.
+            $message = (Get-Content test-output.txt | Select-Object -Last 80) -join "`n"
+            $message = $message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Rust tests failed::$message"
+            exit $testExit
+          }
 
       - name: Build release binaries
         run: cargo build --release
