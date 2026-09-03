@@ -59,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
-use crate::limits;
+use crate::{alog, limits};
 
 use render::CachedBitmap;
 use video::{VideoCodec, VideoPlayer};

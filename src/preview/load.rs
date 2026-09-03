@@ -24,7 +24,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninit
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{Error, Interface, Result};
 
-use crate::{archive, decode, settings, stream::ComStreamReader};
+use crate::{alog, archive, decode, settings, stream::ComStreamReader};
 
 use super::video::{self, VideoCodec};
 
