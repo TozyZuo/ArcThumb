@@ -458,7 +458,8 @@ fn preview_cross_apartment_calls_keep_window_on_owner_thread() {
     use windows::Win32::System::Com::StructuredStorage::CoGetInterfaceAndReleaseStream;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetWindowThreadProcessId, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+        DispatchMessageW, FindWindowExW, GetWindowThreadProcessId, MSG, PM_REMOVE, PeekMessageW,
+        TranslateMessage,
     };
 
     let _com = ComApartment::enter();
@@ -484,7 +485,6 @@ fn preview_cross_apartment_calls_keep_window_on_owner_thread() {
             let unknown: windows::core::IUnknown = unsafe { factory.CreateInstance(None).unwrap() };
             let preview: IPreviewHandler = unknown.cast().unwrap();
             let init: IInitializeWithStream = unknown.cast().unwrap();
-            let ole: IOleWindow = unknown.cast().unwrap();
             let bytes = make_test_zip();
             let stream = unsafe { SHCreateMemStream(Some(&bytes)).unwrap() };
             let rect = RECT {
@@ -499,7 +499,16 @@ fn preview_cross_apartment_calls_keep_window_on_owner_thread() {
                     .SetWindow(HWND(parent_value as *mut c_void), &rect)
                     .unwrap();
                 preview.DoPreview().unwrap();
-                let child = ole.GetWindow().unwrap();
+                // IOleWindow::GetWindow is input_sync; COM rejects calling
+                // that method from an MTA across apartments. Inspect the real
+                // child HWND through Win32 without bypassing preview marshaling.
+                let child = FindWindowExW(
+                    Some(HWND(parent_value as *mut c_void)),
+                    None,
+                    w!("ArcThumbPreviewWindow"),
+                    PCWSTR::null(),
+                )
+                .unwrap();
                 let window_thread = GetWindowThreadProcessId(child, None);
                 preview.SetRect(&rect).unwrap();
                 preview.Unload().unwrap();

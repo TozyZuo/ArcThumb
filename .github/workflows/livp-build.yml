@@ -45,6 +45,8 @@ jobs:
       - name: Test
         shell: pwsh
         run: |
+          cargo build --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test 2>&1 | Tee-Object -FilePath test-output.txt
           $testExit = $LASTEXITCODE
           if ($testExit -ne 0) {
