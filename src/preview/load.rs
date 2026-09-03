@@ -282,7 +282,9 @@ impl<'a, R> CancellableReader<'a, R> {
     fn check(&self) -> io::Result<()> {
         if self.cancelled.load(Ordering::Acquire) {
             Err(io::Error::new(
-                io::ErrorKind::Interrupted,
+                // Read::read_exact/read_to_end retry Interrupted indefinitely.
+                // Cancellation is permanent, so report a non-retryable error.
+                io::ErrorKind::ConnectionAborted,
                 "preview load cancelled",
             ))
         } else {
@@ -356,11 +358,21 @@ mod tests {
         let mut byte = [0; 1];
         assert_eq!(
             reader.read(&mut byte).unwrap_err().kind(),
-            io::ErrorKind::Interrupted
+            io::ErrorKind::ConnectionAborted
         );
         assert_eq!(
             reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
-            io::ErrorKind::Interrupted
+            io::ErrorKind::ConnectionAborted
+        );
+        // Check the error kind above first: on the old implementation these
+        // standard Read helpers would retry forever rather than returning.
+        assert_eq!(
+            reader.read_exact(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            reader.read_to_end(&mut Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
         );
     }
 

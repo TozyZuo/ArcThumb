@@ -88,7 +88,9 @@ pub(crate) enum PreviewVideoState {
 /// independently.
 pub const CLSID_ARCTHUMB_PREVIEW: GUID = GUID::from_u128(0x8C7C1E5F_3D4A_4E2B_9F1A_7B5D6E8F9A0C);
 
-#[implement(IClassFactory)]
+// Keep activation on the registered STA too: an agile factory could create
+// the otherwise non-agile handler in a caller's MTA worker apartment.
+#[implement(IClassFactory, Agile = false)]
 pub struct ArcThumbPreviewClassFactory;
 
 impl IClassFactory_Impl for ArcThumbPreviewClassFactory_Impl {
@@ -125,7 +127,17 @@ impl IClassFactory_Impl for ArcThumbPreviewClassFactory_Impl {
 ///
 /// All mutable state lives behind interior-mutability primitives so
 /// the COM trait methods can mutate it through `&self`.
-#[implement(IPreviewHandler, IInitializeWithStream, IObjectWithSite, IOleWindow)]
+// windows-rs implements IAgileObject/free-threaded marshaling by default.
+// This handler owns HWNDs and RefCells and MUST stay on its creating STA.
+// Otherwise prevhost calls DoPreview on an RPC worker without a message pump;
+// its child window stays white and is destroyed when that worker exits.
+#[implement(
+    IPreviewHandler,
+    IInitializeWithStream,
+    IObjectWithSite,
+    IOleWindow,
+    Agile = false
+)]
 #[derive(Default)]
 pub struct ArcThumbPreviewHandler {
     /// IStream stashed by `Initialize`. Consumed by `DoPreview`.
@@ -146,6 +158,8 @@ pub struct ArcThumbPreviewHandler {
     /// Cached HBITMAP at the last drawn (width, height). Replaced on
     /// resize. Freed via `CachedBitmap::Drop`.
     pub(crate) cache: RefCell<Option<CachedBitmap>>,
+    /// A resize timer requests a cache rebuild in the next WM_PAINT.
+    pub(crate) resize_ready: Cell<bool>,
     /// Bounded MOV payload extracted from a LIVP. Shared with a playback
     /// worker without another full-size copy.
     video_bytes: RefCell<Option<Arc<[u8]>>>,
@@ -377,6 +391,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                 }
             }
             *self.this.cache.borrow_mut() = None;
+            self.this.resize_ready.set(false);
             *self.this.source.borrow_mut() = None;
             *self.this.stream.borrow_mut() = None;
             *self.this.video_bytes.borrow_mut() = None;

@@ -125,7 +125,7 @@ pub const CLSID_ARCTHUMB_PROVIDER: GUID = GUID::from_u128(0x0F4F5659_D383_4945_A
 // IClassFactory
 // =============================================================================
 
-#[implement(IClassFactory)]
+#[implement(IClassFactory, Agile = false)]
 pub struct ArcThumbClassFactory;
 
 impl IClassFactory_Impl for ArcThumbClassFactory_Impl {
@@ -168,7 +168,8 @@ impl IClassFactory_Impl for ArcThumbClassFactory_Impl {
 /// `stream` is populated by `IInitializeWithStream::Initialize`, then
 /// consumed (eventually) by `IThumbnailProvider::GetThumbnail`. Phase 1
 /// stores it but never reads from it.
-#[implement(IThumbnailProvider, IInitializeWithStream)]
+// RefCell and the retained IStream belong to the registered apartment.
+#[implement(IThumbnailProvider, IInitializeWithStream, Agile = false)]
 #[derive(Default)]
 pub struct ArcThumbProvider {
     stream: RefCell<Option<IStream>>,

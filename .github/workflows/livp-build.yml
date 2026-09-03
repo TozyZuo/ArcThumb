@@ -73,3 +73,13 @@ jobs:
           path: target/installer/ArcThumb-Setup.exe
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload diagnostic binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcThumb-LIVP-Binaries
+          path: |
+            target/release/arcthumb.dll
+            target/release/arcthumb-config.exe
+          if-no-files-found: error
+          retention-days: 14

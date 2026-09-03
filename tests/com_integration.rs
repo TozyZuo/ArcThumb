@@ -421,6 +421,124 @@ fn preview_class_factory_creates_handler() {
     let _ole: IOleWindow = unknown.cast().expect("cast IOleWindow");
 }
 
+/// Registry ThreadingModel=Apartment is insufficient if QueryInterface exposes
+/// windows-rs's default IAgileObject/IMarshal implementation. Both the factory
+/// and the HWND-owning handler must use standard apartment marshaling.
+#[test]
+fn preview_factory_and_handler_are_apartment_bound() {
+    let _com = ComApartment::enter();
+    let (_dll, factory) = load_preview_factory();
+    let unknown: windows::core::IUnknown = unsafe { factory.CreateInstance(None).unwrap() };
+    let factory_unknown: windows::core::IUnknown = factory.cast().unwrap();
+    for object in [&factory_unknown, &unknown] {
+        for iid in [
+            GUID::from_u128(0x94ea2b94_e9cc_49e0_c0ff_ee64ca8f5b90), // IAgileObject
+            GUID::from_u128(0x00000003_0000_0000_c000_000000000046), // IMarshal
+        ] {
+            let mut ptr = std::ptr::null_mut();
+            let hr = unsafe { object.query(&iid, &mut ptr) };
+            if !ptr.is_null() {
+                drop(unsafe { windows::core::IUnknown::from_raw(ptr) });
+            }
+            assert_eq!(hr, windows::Win32::Foundation::E_NOINTERFACE);
+        }
+    }
+}
+
+/// Unlike the original same-thread smoke test, calls arrive from an MTA like
+/// prevhost's RPC dispatch. COM must deliver activation/window operations to
+/// the owning STA, which is the only thread with a UI message pump.
+#[test]
+fn preview_cross_apartment_calls_keep_window_on_owner_thread() {
+    use std::mem::ManuallyDrop;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    use windows::Win32::System::Com::COINIT_MULTITHREADED;
+    use windows::Win32::System::Com::Marshal::CoMarshalInterThreadInterfaceInStream;
+    use windows::Win32::System::Com::StructuredStorage::CoGetInterfaceAndReleaseStream;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetWindowThreadProcessId, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+    };
+
+    let _com = ComApartment::enter();
+    let (_dll, factory) = load_preview_factory();
+    let owner_thread = unsafe { GetCurrentThreadId() };
+    let parent = create_hidden_parent();
+    let marshalled =
+        unsafe { CoMarshalInterThreadInterfaceInStream(&IClassFactory::IID, &factory).unwrap() };
+    // This marshal packet (not a raw factory interface) is designed to cross
+    // apartments. The destination consumes it with CoGetInterfaceAndReleaseStream.
+    let packet = marshalled.into_raw() as usize;
+    let parent_value = parent.0 as usize;
+    let (send, recv) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(|| {
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+                .ok()
+                .unwrap();
+            let _com = ComApartment;
+            let packet = ManuallyDrop::new(unsafe { IStream::from_raw(packet as *mut c_void) });
+            let factory: IClassFactory =
+                unsafe { CoGetInterfaceAndReleaseStream(&*packet).unwrap() };
+            let unknown: windows::core::IUnknown = unsafe { factory.CreateInstance(None).unwrap() };
+            let preview: IPreviewHandler = unknown.cast().unwrap();
+            let init: IInitializeWithStream = unknown.cast().unwrap();
+            let ole: IOleWindow = unknown.cast().unwrap();
+            let bytes = make_test_zip();
+            let stream = unsafe { SHCreateMemStream(Some(&bytes)).unwrap() };
+            let rect = RECT {
+                left: 0,
+                top: 0,
+                right: 200,
+                bottom: 200,
+            };
+            unsafe {
+                init.Initialize(&stream, 0).unwrap();
+                preview
+                    .SetWindow(HWND(parent_value as *mut c_void), &rect)
+                    .unwrap();
+                preview.DoPreview().unwrap();
+                let child = ole.GetWindow().unwrap();
+                let window_thread = GetWindowThreadProcessId(child, None);
+                preview.SetRect(&rect).unwrap();
+                preview.Unload().unwrap();
+                assert!(
+                    !IsWindow(Some(child)).as_bool(),
+                    "Unload must destroy on the owner thread"
+                );
+                assert_eq!(
+                    window_thread, owner_thread,
+                    "preview HWND was created on an RPC worker"
+                );
+            }
+        });
+        let _ = send.send(outcome);
+    });
+
+    let started = Instant::now();
+    let outcome = loop {
+        if let Ok(outcome) = recv.try_recv() {
+            break outcome;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "cross-apartment preview call hung"
+        );
+        let mut msg = MSG::default();
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    worker.join().unwrap();
+    unsafe { DestroyWindow(parent).unwrap() };
+    outcome.unwrap();
+}
+
 #[test]
 fn preview_handler_end_to_end() {
     let _com = ComApartment::enter();

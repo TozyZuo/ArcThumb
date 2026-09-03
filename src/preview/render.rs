@@ -9,8 +9,9 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, REC
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, COLOR_WINDOW, CreateCompatibleDC, CreateSolidBrush, DT_CENTER,
     DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    FillRect, GetSysColor, HBITMAP, HBRUSH, HGDIOBJ, PAINTSTRUCT, SRCCOPY, STRETCH_HALFTONE,
-    SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TRANSPARENT,
+    FillRect, GetSysColor, HBITMAP, HBRUSH, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SRCCOPY,
+    STRETCH_HALFTONE, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_RETURN, VK_SPACE};
@@ -113,7 +114,7 @@ unsafe extern "system" fn preview_wnd_proc(
                         ) {
                             validate_video_paint(hwnd, this);
                         } else {
-                            paint(hwnd, this, false);
+                            paint(hwnd, this, this.resize_ready.replace(false));
                         }
                     } else {
                         paint_empty(hwnd);
@@ -155,7 +156,11 @@ unsafe extern "system" fn preview_wnd_proc(
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ArcThumbPreviewHandler;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     if !ptr.is_null() {
-                        paint(hwnd, &*ptr, true);
+                        // BeginPaint in WM_TIMER has an empty update region,
+                        // so it builds the first bitmap but never displays it.
+                        // Request a real WM_PAINT to commit and draw the cache.
+                        (&*ptr).resize_ready.set(true);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }));
                 LRESULT(0)
