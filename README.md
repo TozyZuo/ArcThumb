@@ -53,7 +53,7 @@ JPEG, PNG, GIF, BMP, TIFF, ICO, WebP, HEIC, and HEIF. Each format can be individ
 
 ### LIVP motion playback
 
-Open Explorer's preview pane with `Alt+P`, select a `.livp`, then click the still image or press `Space`/`Enter` to play or pause its MOV. The MOV is read directly from the ZIP container into bounded memory (up to 256 MiB); ArcThumb does not extract a temporary video file.
+Open Explorer's preview pane with `Alt+P`, select a `.livp`, then click the still image or press `Space`/`Enter` to play or pause its MOV. Playback returns to the cached still when the clip finishes; click again to replay. The player is prepared in the background and reused while the same file remains selected. The MOV is read directly from the ZIP container into bounded memory (up to 256 MiB); ArcThumb does not extract a temporary video file.
 
 Playback uses Windows Media Foundation. H.264 MOV clips normally work with the decoder included in Windows 10/11. H.265/HEVC clips require a Media Foundation HEVC decoder, normally [Microsoft HEVC Video Extensions](https://apps.microsoft.com/detail/9NMZLZ57R3T7). The WIC HEIC decoder used for thumbnails, including `wic_heic`, only decodes the still image and does not provide an H.265 video decoder. When HEVC support is missing, ArcThumb keeps showing the still image and displays an installation hint instead of failing the whole preview.
 

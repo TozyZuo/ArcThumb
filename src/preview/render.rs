@@ -25,7 +25,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::bitmap;
 
-use super::{ArcThumbPreviewHandler, PreviewVideoState, video};
+use super::{ArcThumbPreviewHandler, video};
 
 /// Owned HBITMAP wrapper that frees the GDI handle on Drop.
 ///
@@ -108,10 +108,7 @@ unsafe extern "system" fn preview_wnd_proc(
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     if !ptr.is_null() {
                         let this = &*ptr;
-                        if matches!(
-                            this.video_state(),
-                            PreviewVideoState::Playing | PreviewVideoState::Paused
-                        ) {
+                        if hwnd == this.video_hwnd.get() {
                             validate_video_paint(hwnd, this);
                         } else {
                             paint(hwnd, this, this.resize_ready.replace(false));

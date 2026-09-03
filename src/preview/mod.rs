@@ -54,8 +54,9 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
 };
 use windows::Win32::UI::Shell::{IPreviewHandler, IPreviewHandler_Impl};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GWLP_USERDATA, MSG, MoveWindow, SetParent, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WM_KEYDOWN, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DestroyWindow, GWLP_USERDATA, MSG, MoveWindow, SW_HIDE, SW_SHOWNA, SetParent,
+    SetWindowLongPtrW, ShowWindow, WINDOW_EX_STYLE, WM_KEYDOWN, WS_CHILD, WS_CLIPCHILDREN,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement, w};
 
@@ -152,6 +153,9 @@ pub struct ArcThumbPreviewHandler {
     /// Our owned child window, created in `DoPreview`. Destroyed in
     /// `Unload` (or in `Drop` as a safety net).
     child_hwnd: Cell<HWND>,
+    /// EVR paints into a separate, initially hidden child. Hiding it restores
+    /// the cached cover even if the renderer posts a late frame after stopping.
+    video_hwnd: Cell<HWND>,
     /// Decoded source image, retained across `SetRect` events so we
     /// don't re-parse the archive on every drag-resize tick.
     pub(crate) source: RefCell<Option<image::DynamicImage>>,
@@ -189,6 +193,10 @@ impl Drop for ArcThumbPreviewHandler {
         let hwnd = self.child_hwnd.get();
         if !hwnd.is_invalid() {
             unsafe {
+                let video = self.video_hwnd.replace(HWND::default());
+                if !video.is_invalid() {
+                    SetWindowLongPtrW(video, GWLP_USERDATA, 0);
+                }
                 // Clear our pointer first so a stray WM_PAINT during
                 // teardown can't dereference us.
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -289,6 +297,11 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             let child = self.this.child_hwnd.get();
             if !child.is_invalid() && !hwnd.is_invalid() {
                 let r = self.this.rect.get();
+                self.this
+                    .resize_video_window(r.right - r.left, r.bottom - r.top);
+                if let Some(player) = self.this.video_player.borrow().as_ref() {
+                    player.resize(r.right - r.left, r.bottom - r.top);
+                }
                 unsafe {
                     let _ = SetParent(child, Some(hwnd));
                     let _ = MoveWindow(
@@ -312,6 +325,8 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
             }
             let r = unsafe { *prc };
             self.this.rect.set(r);
+            self.this
+                .resize_video_window(r.right - r.left, r.bottom - r.top);
             if let Some(player) = self.this.video_player.borrow().as_ref() {
                 player.resize(r.right - r.left, r.bottom - r.top);
             }
@@ -384,6 +399,12 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                 slot.cancel();
             }
             let hwnd = self.this.child_hwnd.replace(HWND::default());
+            let video = self.this.video_hwnd.replace(HWND::default());
+            if !video.is_invalid() {
+                unsafe {
+                    SetWindowLongPtrW(video, GWLP_USERDATA, 0);
+                }
+            }
             if !hwnd.is_invalid() {
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -470,7 +491,7 @@ impl ArcThumbPreviewHandler_Impl {
                 WINDOW_EX_STYLE(0),
                 PCWSTR(atom as usize as *const u16),
                 w!(""),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN,
                 r.left,
                 r.top,
                 width,
@@ -495,10 +516,6 @@ impl ArcThumbPreviewHandler_Impl {
 }
 
 impl ArcThumbPreviewHandler {
-    pub(crate) fn video_state(&self) -> PreviewVideoState {
-        self.video_state.get()
-    }
-
     pub(crate) fn video_overlay_text(&self) -> Option<&'static str> {
         if self.load_slot.borrow().is_some() && self.source.borrow().is_none() {
             return Some("Loading preview...");
@@ -552,6 +569,83 @@ impl ArcThumbPreviewHandler {
         unsafe {
             let _ = InvalidateRect(Some(self.child_hwnd.get()), None, true);
         }
+        if self.video_state.get() == PreviewVideoState::Idle {
+            // Resolve the source/topology in the background while the user
+            // views the still. Preparation never starts the presentation.
+            self.prepare_video();
+        }
+    }
+
+    fn resize_video_window(&self, width: i32, height: i32) {
+        let hwnd = self.video_hwnd.get();
+        if !hwnd.is_invalid() {
+            unsafe {
+                let _ = MoveWindow(hwnd, 0, 0, width.max(1), height.max(1), false);
+            }
+        }
+    }
+
+    fn prepare_video(&self) {
+        if let Some(old) = self.video_player.borrow_mut().take() {
+            self.video_token.set(0);
+            old.shutdown();
+        }
+        let old = self.video_hwnd.replace(HWND::default());
+        if !old.is_invalid() {
+            unsafe {
+                SetWindowLongPtrW(old, GWLP_USERDATA, 0);
+                let _ = DestroyWindow(old);
+            }
+        }
+        let Some(bytes) = self.video_bytes.borrow().as_ref().cloned() else {
+            return;
+        };
+        let hwnd = self.child_hwnd.get();
+        if hwnd.is_invalid() {
+            return;
+        }
+        let r = self.rect.get();
+        let result = (|| -> Result<VideoPlayer> {
+            // Create HWNDs only on the handler's STA, never on the MF worker.
+            let video = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(render::register_window_class() as usize as *const u16),
+                    w!(""),
+                    WS_CHILD,
+                    0,
+                    0,
+                    (r.right - r.left).max(1),
+                    (r.bottom - r.top).max(1),
+                    Some(hwnd),
+                    None,
+                    Some(HINSTANCE(GetModuleHandleW(None)?.0)),
+                    Some(self as *const Self as *const c_void),
+                )?
+            };
+            self.video_hwnd.set(video);
+            let token = video::next_player_token();
+            self.video_token.set(token);
+            VideoPlayer::prepare(
+                bytes,
+                hwnd,
+                video,
+                r.right - r.left,
+                r.bottom - r.top,
+                token,
+            )
+        })();
+        match result {
+            Ok(player) => *self.video_player.borrow_mut() = Some(player),
+            Err(error) => {
+                self.video_token.set(0);
+                self.video_error.set(error.code());
+                self.video_state.set(PreviewVideoState::Error);
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+        }
     }
 
     pub(crate) fn request_video_repaint(&self) {
@@ -570,45 +664,21 @@ impl ArcThumbPreviewHandler {
                     player.toggle();
                 }
             }
-            PreviewVideoState::Ended => {
+            PreviewVideoState::Idle | PreviewVideoState::Ended | PreviewVideoState::Error => {
+                if self.video_state.get() == PreviewVideoState::Error
+                    || self.video_player.borrow().is_none()
+                {
+                    self.prepare_video();
+                }
+                let player = self.video_player.borrow();
+                let Some(player) = player.as_ref() else {
+                    return;
+                };
                 self.video_state.set(PreviewVideoState::Starting);
                 unsafe {
                     let _ = InvalidateRect(Some(self.child_hwnd.get()), None, true);
                 }
-                if let Some(player) = self.video_player.borrow().as_ref() {
-                    player.replay();
-                }
-            }
-            PreviewVideoState::Idle | PreviewVideoState::Error => {
-                if let Some(old) = self.video_player.borrow_mut().take() {
-                    self.video_token.set(0);
-                    old.shutdown();
-                }
-                let Some(bytes) = self.video_bytes.borrow().as_ref().cloned() else {
-                    return;
-                };
-                let hwnd = self.child_hwnd.get();
-                if hwnd.is_invalid() {
-                    return;
-                }
-                let r = self.rect.get();
-                self.video_state.set(PreviewVideoState::Starting);
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, true);
-                }
-                let token = video::next_player_token();
-                self.video_token.set(token);
-                match VideoPlayer::start(bytes, hwnd, r.right - r.left, r.bottom - r.top, token) {
-                    Ok(player) => *self.video_player.borrow_mut() = Some(player),
-                    Err(error) => {
-                        self.video_token.set(0);
-                        self.video_error.set(error.code());
-                        self.video_state.set(PreviewVideoState::Error);
-                        unsafe {
-                            let _ = InvalidateRect(Some(hwnd), None, true);
-                        }
-                    }
-                }
+                player.play();
             }
         }
     }
@@ -627,6 +697,16 @@ impl ArcThumbPreviewHandler {
                 self.video_state.set(PreviewVideoState::Error);
             }
             _ => return,
+        }
+        let video = self.video_hwnd.get();
+        if !video.is_invalid() {
+            let visible = matches!(
+                self.video_state.get(),
+                PreviewVideoState::Playing | PreviewVideoState::Paused
+            );
+            unsafe {
+                let _ = ShowWindow(video, if visible { SW_SHOWNA } else { SW_HIDE });
+            }
         }
         if matches!(
             self.video_state.get(),

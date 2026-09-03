@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFMediaSession, IMFMediaSource, IMFPresentationDescriptor, IMFStreamDescriptor,
-    IMFTopology, IMFTopologyNode, IMFVideoDisplayControl, MEEndOfPresentation, MESessionClosed,
-    MESessionTopologyStatus, MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT,
-    MF_EVENT_TOPOLOGY_STATUS, MF_RESOLUTION_MEDIASOURCE, MF_RESOLUTION_READ,
+    IMFTopology, IMFTopologyNode, IMFVideoDisplayControl, MESessionClosed, MESessionEnded,
+    MESessionPaused, MESessionStarted, MESessionTopologyStatus, MF_E_NO_EVENTS_AVAILABLE,
+    MF_EVENT_FLAG_NO_WAIT, MF_EVENT_TOPOLOGY_STATUS, MF_RESOLUTION_MEDIASOURCE, MF_RESOLUTION_READ,
     MF_TOPOLOGY_OUTPUT_NODE, MF_TOPOLOGY_SOURCESTREAM_NODE, MF_TOPONODE_PRESENTATION_DESCRIPTOR,
     MF_TOPONODE_SOURCE, MF_TOPONODE_STREAM_DESCRIPTOR, MF_TOPOSTATUS_READY, MF_VERSION,
     MFCreateAudioRendererActivate, MFCreateMFByteStreamOnStream, MFCreateMediaSession,
@@ -72,7 +72,6 @@ pub(super) fn detect_mov_codec(bytes: &[u8]) -> VideoCodec {
 
 enum PlayerCommand {
     Toggle,
-    Replay,
     Resize(i32, i32),
     Repaint,
 }
@@ -122,41 +121,92 @@ impl Drop for MediaSessionGuard {
 pub(super) struct VideoPlayer {
     commands: SyncSender<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
+    play_requested: Arc<AtomicBool>,
+}
+
+static ACTIVE_WORKERS: AtomicU32 = AtomicU32::new(0);
+
+struct WorkerPermit;
+
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlaybackTarget {
+    notify_window: isize,
+    render_window: isize,
+    token: u32,
+}
+
+impl PlaybackTarget {
+    fn notify(self, notice: usize, status: HRESULT) {
+        post_notice(
+            HWND(self.notify_window as *mut c_void),
+            notice,
+            status,
+            self.token,
+        );
+    }
 }
 
 impl VideoPlayer {
-    pub(super) fn start(
+    pub(super) fn prepare(
         bytes: Arc<[u8]>,
         hwnd: HWND,
+        video_hwnd: HWND,
         width: i32,
         height: i32,
         token: u32,
     ) -> Result<Self> {
+        // Prewarming also happens during fast file selection. A stuck system
+        // codec must not cause an unbounded number of detached workers.
+        ACTIVE_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 4).then_some(count + 1)
+            })
+            .map_err(|_| Error::from_hresult(E_FAIL))?;
+        let permit = WorkerPermit;
         // Resize/repaint are advisory and can arrive much faster than a codec
         // consumes them. A bounded queue plus try_send prevents either memory
         // growth or UI-thread blocking while Explorer is being resized.
         let (commands, receiver) = mpsc::sync_channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        let hwnd_value = hwnd.0 as isize;
+        let play_requested = Arc::new(AtomicBool::new(false));
+        let worker_play_requested = Arc::clone(&play_requested);
+        let target = PlaybackTarget {
+            notify_window: hwnd.0 as isize,
+            render_window: video_hwnd.0 as isize,
+            token,
+        };
         let worker = thread::Builder::new()
             .name("arcthumb-livp-video".to_string())
             .spawn(move || {
+                let _permit = permit;
                 // Recreate the handle value on the destination thread; HWND is
                 // process-global but its typed wrapper contains a raw pointer
                 // and is intentionally not moved between Rust threads.
-                let hwnd = HWND(hwnd_value as *mut c_void);
                 match catch_unwind(AssertUnwindSafe(|| {
-                    run_worker(bytes, hwnd, width, height, receiver, token, worker_shutdown)
+                    run_worker(
+                        bytes,
+                        target,
+                        (width, height),
+                        receiver,
+                        worker_shutdown,
+                        worker_play_requested,
+                    )
                 })) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         alog!("LIVP video playback failed: {error}");
-                        post_notice(hwnd, NOTICE_FAILED, error.code(), token);
+                        target.notify(NOTICE_FAILED, error.code());
                     }
                     Err(_) => {
                         alog!("PANIC caught in LIVP video worker");
-                        post_notice(hwnd, NOTICE_FAILED, E_FAIL, token);
+                        target.notify(NOTICE_FAILED, E_FAIL);
                     }
                 }
             })
@@ -166,15 +216,21 @@ impl VideoPlayer {
         // must never join a codec/resolver thread because those components are
         // third-party and may block indefinitely.
         drop(worker);
-        Ok(Self { commands, shutdown })
+        Ok(Self {
+            commands,
+            shutdown,
+            play_requested,
+        })
     }
 
     pub(super) fn toggle(&self) {
         let _ = self.commands.try_send(PlayerCommand::Toggle);
     }
 
-    pub(super) fn replay(&self) {
-        let _ = self.commands.try_send(PlayerCommand::Replay);
+    pub(super) fn play(&self) {
+        // Unlike advisory paints/resizes, a click cannot be dropped when the
+        // queue is full, including while topology resolution is still running.
+        self.play_requested.store(true, Ordering::Release);
     }
 
     pub(super) fn resize(&self, width: i32, height: i32) {
@@ -230,12 +286,11 @@ fn post_notice(hwnd: HWND, notice: usize, status: HRESULT, token: u32) {
 
 fn run_worker(
     bytes: Arc<[u8]>,
-    hwnd: HWND,
-    width: i32,
-    height: i32,
+    target: PlaybackTarget,
+    size: (i32, i32),
     receiver: Receiver<PlayerCommand>,
-    token: u32,
     shutdown: Arc<AtomicBool>,
+    play_requested: Arc<AtomicBool>,
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
     struct ComApartment;
@@ -259,17 +314,16 @@ fn run_worker(
 
     // Guard declaration order ensures Media Foundation shuts down before the
     // COM apartment on success, error, and panic alike.
-    run_worker_initialized(bytes, hwnd, width, height, receiver, token, &shutdown)
+    run_worker_initialized(bytes, target, size, receiver, &shutdown, &play_requested)
 }
 
 fn run_worker_initialized(
     bytes: Arc<[u8]>,
-    hwnd: HWND,
-    width: i32,
-    height: i32,
+    target: PlaybackTarget,
+    size: (i32, i32),
     receiver: Receiver<PlayerCommand>,
-    token: u32,
     shutdown: &AtomicBool,
+    play_requested: &AtomicBool,
 ) -> Result<()> {
     let stream = unsafe { SHCreateMemStream(Some(bytes.as_ref())) }
         .ok_or_else(|| Error::from_hresult(E_FAIL))?;
@@ -288,11 +342,11 @@ fn run_worker_initialized(
             &mut object,
         )?;
     }
+    let source = MediaSourceGuard(object.ok_or_else(|| Error::from_hresult(E_FAIL))?.cast()?);
     if shutdown.load(Ordering::Acquire) {
         return Ok(());
     }
-    let source = MediaSourceGuard(object.ok_or_else(|| Error::from_hresult(E_FAIL))?.cast()?);
-    let topology = create_playback_topology(&source, hwnd)?;
+    let topology = create_playback_topology(&source, HWND(target.render_window as *mut c_void))?;
     if shutdown.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -302,14 +356,13 @@ fn run_worker_initialized(
     let mut display: Option<IMFVideoDisplayControl> = None;
     let mut topology_ready = false;
     let mut playing = false;
-    let mut ended = false;
-    let mut current_size = (width.max(1), height.max(1));
+    let mut ended = true;
+    let mut current_size = (size.0.max(1), size.1.max(1));
     while !shutdown.load(Ordering::Acquire) {
         match receiver.recv_timeout(Duration::from_millis(12)) {
             Ok(PlayerCommand::Toggle) if topology_ready && playing => {
                 unsafe { session.Pause()? };
                 playing = false;
-                post_notice(hwnd, NOTICE_PAUSED, HRESULT(0), token);
             }
             Ok(PlayerCommand::Toggle) if topology_ready => {
                 let start = if ended {
@@ -320,14 +373,6 @@ fn run_worker_initialized(
                 unsafe { session.Start(std::ptr::null(), &start)? };
                 playing = true;
                 ended = false;
-                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
-            }
-            Ok(PlayerCommand::Replay) if topology_ready => {
-                let start = PROPVARIANT::from(0i64);
-                unsafe { session.Start(std::ptr::null(), &start)? };
-                playing = true;
-                ended = false;
-                post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
             }
             Ok(PlayerCommand::Resize(width, height)) => {
                 current_size = (width.max(1), height.max(1));
@@ -335,9 +380,13 @@ fn run_worker_initialized(
                     resize_video(control, current_size)?;
                 }
             }
-            Ok(PlayerCommand::Repaint) => {
+            Ok(PlayerCommand::Repaint) if !ended => {
                 if let Some(control) = display.as_ref() {
-                    unsafe { control.RepaintVideo()? };
+                    // Advisory repaint can race a stop or device transition.
+                    // It must not turn an otherwise replayable clip into Error.
+                    unsafe {
+                        let _ = control.RepaintVideo();
+                    }
                 }
             }
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -366,16 +415,27 @@ fn run_worker_initialized(
                         }
                         resize_video(control, current_size)?;
                     }
-                    let start = PROPVARIANT::default();
-                    unsafe { session.Start(std::ptr::null(), &start)? };
-                    playing = true;
-                    post_notice(hwnd, NOTICE_PLAYING, HRESULT(0), token);
                 }
-            } else if event_type == MEEndOfPresentation.0 as u32 {
+            } else if event_type == MESessionStarted.0 as u32 {
+                target.notify(NOTICE_PLAYING, HRESULT(0));
+            } else if event_type == MESessionPaused.0 as u32 {
+                target.notify(NOTICE_PAUSED, HRESULT(0));
+            } else if event_type == MESessionEnded.0 as u32 {
+                // MEEndOfPresentation only means the source was exhausted;
+                // decoded frames may still be queued in the renderer then.
                 playing = false;
                 ended = true;
-                post_notice(hwnd, NOTICE_ENDED, HRESULT(0), token);
+                target.notify(NOTICE_ENDED, HRESULT(0));
             }
+        }
+        if topology_ready && play_requested.swap(false, Ordering::AcqRel) {
+            // Retain the source, decoder, topology and session across replays.
+            // Seeking does not re-open the archive or copy the MOV again.
+            unsafe {
+                session.Start(std::ptr::null(), &PROPVARIANT::from(0i64))?;
+            }
+            playing = true;
+            ended = false;
         }
     }
 
