@@ -71,10 +71,14 @@ pub(super) fn detect_mov_codec(bytes: &[u8]) -> VideoCodec {
 }
 
 enum PlayerCommand {
-    Toggle,
     Resize(i32, i32),
     Repaint,
 }
+
+const REQUEST_NONE: u32 = 0;
+const REQUEST_PLAY: u32 = 1;
+const REQUEST_PAUSE: u32 = 2;
+const REQUEST_RESUME: u32 = 3;
 
 /// Media Foundation requires an explicit `Shutdown` before the final release.
 /// These guards also cover early returns while topology resolution reports a
@@ -121,7 +125,7 @@ impl Drop for MediaSessionGuard {
 pub(super) struct VideoPlayer {
     commands: SyncSender<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
-    play_requested: Arc<AtomicBool>,
+    playback_request: Arc<AtomicU32>,
 }
 
 static ACTIVE_WORKERS: AtomicU32 = AtomicU32::new(0);
@@ -175,8 +179,8 @@ impl VideoPlayer {
         let (commands, receiver) = mpsc::sync_channel(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        let play_requested = Arc::new(AtomicBool::new(false));
-        let worker_play_requested = Arc::clone(&play_requested);
+        let playback_request = Arc::new(AtomicU32::new(REQUEST_NONE));
+        let worker_playback_request = Arc::clone(&playback_request);
         let target = PlaybackTarget {
             notify_window: hwnd.0 as isize,
             render_window: video_hwnd.0 as isize,
@@ -196,7 +200,7 @@ impl VideoPlayer {
                         (width, height),
                         receiver,
                         worker_shutdown,
-                        worker_play_requested,
+                        worker_playback_request,
                     )
                 })) {
                     Ok(Ok(())) => {}
@@ -219,18 +223,24 @@ impl VideoPlayer {
         Ok(Self {
             commands,
             shutdown,
-            play_requested,
+            playback_request,
         })
     }
 
-    pub(super) fn toggle(&self) {
-        let _ = self.commands.try_send(PlayerCommand::Toggle);
+    pub(super) fn pause(&self) {
+        self.playback_request
+            .store(REQUEST_PAUSE, Ordering::Release);
+    }
+
+    pub(super) fn resume(&self) {
+        self.playback_request
+            .store(REQUEST_RESUME, Ordering::Release);
     }
 
     pub(super) fn play(&self) {
         // Unlike advisory paints/resizes, a click cannot be dropped when the
         // queue is full, including while topology resolution is still running.
-        self.play_requested.store(true, Ordering::Release);
+        self.playback_request.store(REQUEST_PLAY, Ordering::Release);
     }
 
     pub(super) fn resize(&self, width: i32, height: i32) {
@@ -290,7 +300,7 @@ fn run_worker(
     size: (i32, i32),
     receiver: Receiver<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
-    play_requested: Arc<AtomicBool>,
+    playback_request: Arc<AtomicU32>,
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
     struct ComApartment;
@@ -314,7 +324,7 @@ fn run_worker(
 
     // Guard declaration order ensures Media Foundation shuts down before the
     // COM apartment on success, error, and panic alike.
-    run_worker_initialized(bytes, target, size, receiver, &shutdown, &play_requested)
+    run_worker_initialized(bytes, target, size, receiver, &shutdown, &playback_request)
 }
 
 fn run_worker_initialized(
@@ -323,7 +333,7 @@ fn run_worker_initialized(
     size: (i32, i32),
     receiver: Receiver<PlayerCommand>,
     shutdown: &AtomicBool,
-    play_requested: &AtomicBool,
+    playback_request: &AtomicU32,
 ) -> Result<()> {
     let stream = unsafe { SHCreateMemStream(Some(bytes.as_ref())) }
         .ok_or_else(|| Error::from_hresult(E_FAIL))?;
@@ -360,20 +370,6 @@ fn run_worker_initialized(
     let mut current_size = (size.0.max(1), size.1.max(1));
     while !shutdown.load(Ordering::Acquire) {
         match receiver.recv_timeout(Duration::from_millis(12)) {
-            Ok(PlayerCommand::Toggle) if topology_ready && playing => {
-                unsafe { session.Pause()? };
-                playing = false;
-            }
-            Ok(PlayerCommand::Toggle) if topology_ready => {
-                let start = if ended {
-                    PROPVARIANT::from(0i64)
-                } else {
-                    PROPVARIANT::default()
-                };
-                unsafe { session.Start(std::ptr::null(), &start)? };
-                playing = true;
-                ended = false;
-            }
             Ok(PlayerCommand::Resize(width, height)) => {
                 current_size = (width.max(1), height.max(1));
                 if let Some(control) = display.as_ref() {
@@ -428,14 +424,33 @@ fn run_worker_initialized(
                 target.notify(NOTICE_ENDED, HRESULT(0));
             }
         }
-        if topology_ready && play_requested.swap(false, Ordering::AcqRel) {
-            // Retain the source, decoder, topology and session across replays.
-            // Seeking does not re-open the archive or copy the MOV again.
-            unsafe {
-                session.Start(std::ptr::null(), &PROPVARIANT::from(0i64))?;
+        if topology_ready {
+            // Absolute requests are idempotent if both the host accelerator
+            // and window proc see a key before the async state notice arrives.
+            // They also cannot be dropped behind queued resizes/repaints.
+            match playback_request.swap(REQUEST_NONE, Ordering::AcqRel) {
+                REQUEST_PLAY => {
+                    // Retain source/decoder/session; only seek on replay.
+                    unsafe {
+                        session.Start(std::ptr::null(), &PROPVARIANT::from(0i64))?;
+                    }
+                    playing = true;
+                    ended = false;
+                }
+                REQUEST_PAUSE if playing => {
+                    unsafe {
+                        session.Pause()?;
+                    }
+                    playing = false;
+                }
+                REQUEST_RESUME if !playing && !ended => {
+                    unsafe {
+                        session.Start(std::ptr::null(), &PROPVARIANT::default())?;
+                    }
+                    playing = true;
+                }
+                _ => {}
             }
-            playing = true;
-            ended = false;
         }
     }
 

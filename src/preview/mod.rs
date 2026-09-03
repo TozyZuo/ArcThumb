@@ -659,9 +659,14 @@ impl ArcThumbPreviewHandler {
             PreviewVideoState::None
             | PreviewVideoState::Starting
             | PreviewVideoState::LoadError => {}
-            PreviewVideoState::Playing | PreviewVideoState::Paused => {
+            PreviewVideoState::Playing => {
                 if let Some(player) = self.video_player.borrow().as_ref() {
-                    player.toggle();
+                    player.pause();
+                }
+            }
+            PreviewVideoState::Paused => {
+                if let Some(player) = self.video_player.borrow().as_ref() {
+                    player.resume();
                 }
             }
             PreviewVideoState::Idle | PreviewVideoState::Ended | PreviewVideoState::Error => {
