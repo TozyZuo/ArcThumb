@@ -200,9 +200,18 @@ fn paint_empty(hwnd: HWND) {
 /// renderer to repaint its surface (for example after Explorer was uncovered).
 fn validate_video_paint(hwnd: HWND, this: &ArcThumbPreviewHandler) {
     let mut ps = PAINTSTRUCT::default();
-    let _ = unsafe { BeginPaint(hwnd, &mut ps) };
+    let dc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let mut rect = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+    let software = this
+        .video_player
+        .borrow()
+        .as_ref()
+        .is_some_and(|p| p.paint(dc, rect));
     let _ = unsafe { EndPaint(hwnd, &ps) };
-    this.request_video_repaint();
+    if !software {
+        this.request_video_repaint();
+    }
 }
 
 /// Paint the preview image. When `commit` is true (fired by

@@ -99,7 +99,12 @@ jobs:
         if: steps.gate.outputs.skip == 'false'
         run: cargo build --release
 
-      - name: Build Inno Setup installer
+      - name: Prepare playback runtime
+        if: steps.gate.outputs.skip == 'false'
+        shell: pwsh
+        run: ./scripts/prepare-libvlc.ps1
+
+      - name: Package Inno Setup installer
         if: steps.gate.outputs.skip == 'false'
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
         with:

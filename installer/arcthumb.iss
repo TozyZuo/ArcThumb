@@ -32,7 +32,7 @@
 ; which best-effort cleans both HKCU and HKLM, then removes files.
 
 #define MyAppName       "ArcThumb"
-#define MyAppVersion    "0.11.5"
+#define MyAppVersion    "0.11.6"
 #define MyAppPublisher  "citrussoda-com"
 #define MyAppURL        "https://github.com/citrussoda-com/ArcThumb"
 #define MyAppExeName    "arcthumb-config.exe"
@@ -87,6 +87,9 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Source: "..\target\release\arcthumb.dll";        DestDir: "{app}"; Flags: ignoreversion
 ; Configuration GUI + CLI installer/uninstaller helper.
 Source: "..\target\release\arcthumb-config.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Private LGPL playback runtime and its upstream license notices.
+Source: "..\target\release\libvlc\*"; DestDir: "{app}\libvlc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Dual-license text files.
 Source: "..\LICENSE-MIT";                        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE-APACHE";                     DestDir: "{app}"; Flags: ignoreversion

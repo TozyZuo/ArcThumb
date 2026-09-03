@@ -6,6 +6,30 @@ components are redistributed with ArcThumb (the `arcthumb.dll` shell
 extension and/or `arcthumb-config.exe`) and require separate
 acknowledgement.
 
+## LibVLC playback runtime
+
+The installer includes the unmodified x64 runtime from VideoLAN's
+[VideoLAN.LibVLC.Windows 3.0.23.1](https://www.nuget.org/packages/VideoLAN.LibVLC.Windows/3.0.23.1)
+package, licensed **LGPL-2.1-or-later**. Copyright VideoLAN and VLC authors.
+LibVLC and its codec modules (including FFmpeg's libavcodec) have their own
+licenses; upstream notices and accompanying files are retained in `libvlc/`.
+The LGPL text is also included as `libvlc/COPYING-LibVLC.txt`.
+
+ArcThumb dynamically loads this separate runtime. It does not modify or
+statically link LibVLC. Users may replace the runtime with an ABI-compatible
+LibVLC 3 x64 build and may debug changes to these libraries. ArcThumb imposes
+no restriction on reverse engineering for that purpose.
+
+Upstream source and build instructions:
+
+- [LibVLC NuGet packaging source](https://code.videolan.org/videolan/libvlc-nuget)
+- [VLC 3.0.23 source archive](https://download.videolan.org/pub/videolan/vlc/3.0.23/vlc-3.0.23.tar.xz)
+- [VLC source and contrib dependency build recipes](https://code.videolan.org/videolan/vlc/-/tree/3.0.23)
+
+`scripts/prepare-libvlc.ps1` records the exact binary package version, download
+location and checksum used for this build. The runtime can be built and
+replaced independently of ArcThumb.
+
 ## Slint
 
 [Slint](https://slint.dev/) is used as the GUI toolkit for

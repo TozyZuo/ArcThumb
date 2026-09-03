@@ -55,7 +55,13 @@ JPEG, PNG, GIF, BMP, TIFF, ICO, WebP, HEIC, and HEIF. Each format can be individ
 
 Open Explorer's preview pane with `Alt+P`, select a `.livp`, then click the still image or press `Space`/`Enter` to play or pause its MOV. Playback returns to the cached still when the clip finishes; click again to replay. The player is prepared in the background and reused while the same file remains selected. The MOV is read directly from the ZIP container into bounded memory (up to 256 MiB); ArcThumb does not extract a temporary video file.
 
-Playback uses Windows Media Foundation. H.264 MOV clips normally work with the decoder included in Windows 10/11. H.265/HEVC clips require a Media Foundation HEVC decoder, normally [Microsoft HEVC Video Extensions](https://apps.microsoft.com/detail/9NMZLZ57R3T7). The WIC HEIC decoder used for thumbnails, including `wic_heic`, only decodes the still image and does not provide an H.265 video decoder. When HEVC support is missing, ArcThumb keeps showing the still image and displays an installation hint instead of failing the whole preview.
+Playback first uses Windows Media Foundation. If the system decoder is unavailable or fails, ArcThumb automatically tries the bundled LibVLC software decoder. Microsoft HEVC Video Extensions and a separate VLC installation are not required for video playback, including on Windows 10 LTSC 21H2. HEIC still images continue to require a WIC decoder such as `wic_heic`.
+
+The fallback keeps MOV bytes in memory, shares one LibVLC runtime across file selections, and retains the media/player objects for replay. It uses two decoder threads and a bounded preview frame pair (longest side up to 1280 pixels); decoding and teardown never run on the preview UI thread. Playback shows the video only after its first frame, then restores the cached still at the end. LibVLC restarts the decoder on replay, so first-frame latency can remain, especially for high-resolution HEVC on older CPUs. The fallback deliberately uses software decoding; the existing system path can still use supported hardware.
+
+For troubleshooting a malfunctioning system decoder, set the optional string value `HKCU\Software\ArcThumb\VideoBackend` to `software`, then select the file again. Delete the value to restore automatic selection. A process-local `ARCTHUMB_VIDEO_BACKEND=software` environment variable takes precedence. These options do not change installed codecs.
+
+When building an installer from source, run `pwsh ./scripts/prepare-libvlc.ps1` after `cargo build --release`. The script downloads the pinned official VideoLAN NuGet package, verifies SHA-256, and stages its x64 runtime and licenses. The installer includes this runtime for offline use; previewing files never downloads code. See `THIRD_PARTY_LICENSES.md` for licensing and source links.
 
 ## Installing
 
@@ -243,7 +249,7 @@ The Inno Setup installer does not write any CLSID keys directly. It runs `arcthu
 ## Known limitations
 
 - HEIC/HEIF requires an installed WIC decoder. If Windows cannot decode the still image, LIVP falls back to the normal file icon.
-- LIVP H.265/HEVC playback requires a system Media Foundation HEVC decoder; `wic_heic` alone is not sufficient. H.264 playback has no additional codec dependency on a normal Windows 10/11 installation.
+- LIVP playback uses the system decoder when available and the bundled LibVLC software fallback otherwise. HEIC still-image decoding remains a separate WIC dependency; `wic_heic` does not itself decode videos.
 - AVIF, SVG, and DjVu are not supported.
 - Animated GIF and animated WebP show only the first frame.
 - Encrypted archives are not supported.

@@ -527,7 +527,7 @@ impl ArcThumbPreviewHandler {
             PreviewVideoState::Starting => Some("Opening Live Photo video..."),
             PreviewVideoState::LoadError => Some("Preview is unavailable"),
             PreviewVideoState::Error if self.video_codec.get() == VideoCodec::Hevc => {
-                Some("H.265 unavailable - install Microsoft HEVC Video Extensions")
+                Some("Video unavailable - repair ArcThumb or try another file")
             }
             PreviewVideoState::Error => Some("Live Photo video playback is unavailable"),
             PreviewVideoState::None | PreviewVideoState::Playing | PreviewVideoState::Paused => {
@@ -693,7 +693,21 @@ impl ArcThumbPreviewHandler {
         if token == 0 || token != self.video_token.get() {
             return;
         }
+        if notice.0 == video::NOTICE_FRAME {
+            let hwnd = self.video_hwnd.get();
+            if !hwnd.is_invalid() {
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            return;
+        }
         match notice.0 {
+            video::NOTICE_FALLBACK => {
+                if self.video_state.get() != PreviewVideoState::Starting {
+                    self.video_state.set(PreviewVideoState::Idle);
+                }
+            }
             video::NOTICE_PLAYING => self.video_state.set(PreviewVideoState::Playing),
             video::NOTICE_PAUSED => self.video_state.set(PreviewVideoState::Paused),
             video::NOTICE_ENDED => self.video_state.set(PreviewVideoState::Ended),

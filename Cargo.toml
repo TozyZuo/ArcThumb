@@ -1,6 +1,6 @@
 [package]
 name = "arcthumb"
-version = "0.11.5"
+version = "0.11.6"
 edition = "2024"
 description = "Windows Shell Extension that generates Explorer thumbnails and preview-pane previews for archives, LIVP live photos, and ebooks."
 license = "MIT OR Apache-2.0"

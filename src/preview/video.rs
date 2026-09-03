@@ -3,8 +3,8 @@
 //! The preview handler never writes the clip to disk. The complete, bounded
 //! MOV payload is wrapped in an `IStream`/`IMFByteStream`, resolved as an
 //! MPEG-4 media source, and connected to the system audio renderer and EVR
-//! video renderer. Media Foundation inserts the installed H.264/H.265 decoder
-//! while resolving the partial topology.
+//! video renderer. If the system path fails, bundled LibVLC decodes the same
+//! memory payload in software and publishes bounded frames to the UI thread.
 
 use std::ffi::c_void;
 use std::ops::Deref;
@@ -36,6 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{BOOL, Error, HRESULT, Interface, Result, w};
 
 use crate::alog;
+mod vlc;
+use windows::Win32::Graphics::Gdi::HDC;
 
 /// Private messages sent from the Media Foundation worker back to the preview
 /// window. `WPARAM` carries one of the `NOTICE_*` values and `LPARAM` carries an
@@ -45,6 +47,8 @@ pub(super) const NOTICE_PLAYING: usize = 1;
 pub(super) const NOTICE_PAUSED: usize = 2;
 pub(super) const NOTICE_ENDED: usize = 3;
 pub(super) const NOTICE_FAILED: usize = 4;
+pub(super) const NOTICE_FRAME: usize = 5;
+pub(super) const NOTICE_FALLBACK: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum VideoCodec {
@@ -126,6 +130,8 @@ pub(super) struct VideoPlayer {
     commands: SyncSender<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
     playback_request: Arc<AtomicU32>,
+    wants_playback: Arc<AtomicBool>,
+    frames: Arc<vlc::Frames>,
 }
 
 static ACTIVE_WORKERS: AtomicU32 = AtomicU32::new(0);
@@ -181,6 +187,10 @@ impl VideoPlayer {
         let worker_shutdown = Arc::clone(&shutdown);
         let playback_request = Arc::new(AtomicU32::new(REQUEST_NONE));
         let worker_playback_request = Arc::clone(&playback_request);
+        let wants_playback = Arc::new(AtomicBool::new(false));
+        let worker_wants_playback = Arc::clone(&wants_playback);
+        let frames = Arc::new(vlc::Frames::default());
+        let worker_frames = Arc::clone(&frames);
         let target = PlaybackTarget {
             notify_window: hwnd.0 as isize,
             render_window: video_hwnd.0 as isize,
@@ -194,13 +204,15 @@ impl VideoPlayer {
                 // process-global but its typed wrapper contains a raw pointer
                 // and is intentionally not moved between Rust threads.
                 match catch_unwind(AssertUnwindSafe(|| {
-                    run_worker(
+                    run_worker_with_fallback(
                         bytes,
                         target,
                         (width, height),
                         receiver,
                         worker_shutdown,
                         worker_playback_request,
+                        worker_wants_playback,
+                        worker_frames,
                     )
                 })) {
                     Ok(Ok(())) => {}
@@ -224,20 +236,29 @@ impl VideoPlayer {
             commands,
             shutdown,
             playback_request,
+            wants_playback,
+            frames,
         })
     }
 
+    pub(super) fn paint(&self, dc: HDC, rect: RECT) -> bool {
+        self.frames.paint(dc, rect)
+    }
+
     pub(super) fn pause(&self) {
+        self.wants_playback.store(false, Ordering::Release);
         self.playback_request
             .store(REQUEST_PAUSE, Ordering::Release);
     }
 
     pub(super) fn resume(&self) {
+        self.wants_playback.store(true, Ordering::Release);
         self.playback_request
             .store(REQUEST_RESUME, Ordering::Release);
     }
 
     pub(super) fn play(&self) {
+        self.wants_playback.store(true, Ordering::Release);
         // Unlike advisory paints/resizes, a click cannot be dropped when the
         // queue is full, including while topology resolution is still running.
         self.playback_request.store(REQUEST_PLAY, Ordering::Release);
@@ -294,11 +315,63 @@ fn post_notice(hwnd: HWND, notice: usize, status: HRESULT, token: u32) {
     }
 }
 
-fn run_worker(
+// Release MF objects before entering LibVLC. The optional override supports
+// machines with broken system decoders without changing installed codecs.
+#[allow(clippy::too_many_arguments)]
+fn run_worker_with_fallback(
     bytes: Arc<[u8]>,
     target: PlaybackTarget,
     size: (i32, i32),
     receiver: Receiver<PlayerCommand>,
+    shutdown: Arc<AtomicBool>,
+    request: Arc<AtomicU32>,
+    wants_playback: Arc<AtomicBool>,
+    frames: Arc<vlc::Frames>,
+) -> Result<()> {
+    let backend = std::env::var("ARCTHUMB_VIDEO_BACKEND").ok().or_else(|| {
+        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .open_subkey("Software\\ArcThumb")
+            .ok()?
+            .get_value::<String, _>("VideoBackend")
+            .ok()
+    });
+    let force = backend.as_deref() == Some("software");
+    if !force {
+        match run_worker(
+            Arc::clone(&bytes),
+            target,
+            size,
+            &receiver,
+            Arc::clone(&shutdown),
+            Arc::clone(&request),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => alog!(
+                "LIVP: Media Foundation failed ({}); trying bundled LibVLC",
+                error.code()
+            ),
+        }
+    }
+    if shutdown.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    target.notify(NOTICE_FALLBACK, HRESULT(0));
+    if wants_playback.load(Ordering::Acquire) {
+        let _ = request.compare_exchange(
+            REQUEST_NONE,
+            REQUEST_PLAY,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+    vlc::run(bytes, target, &receiver, shutdown, &request, frames)
+}
+
+fn run_worker(
+    bytes: Arc<[u8]>,
+    target: PlaybackTarget,
+    size: (i32, i32),
+    receiver: &Receiver<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
     playback_request: Arc<AtomicU32>,
 ) -> Result<()> {
@@ -331,7 +404,7 @@ fn run_worker_initialized(
     bytes: Arc<[u8]>,
     target: PlaybackTarget,
     size: (i32, i32),
-    receiver: Receiver<PlayerCommand>,
+    receiver: &Receiver<PlayerCommand>,
     shutdown: &AtomicBool,
     playback_request: &AtomicU32,
 ) -> Result<()> {
@@ -365,6 +438,7 @@ fn run_worker_initialized(
 
     let mut display: Option<IMFVideoDisplayControl> = None;
     let mut topology_ready = false;
+    let preparing_since = Instant::now();
     let mut playing = false;
     let mut ended = true;
     let mut current_size = (size.0.max(1), size.1.max(1));
@@ -423,6 +497,9 @@ fn run_worker_initialized(
                 ended = true;
                 target.notify(NOTICE_ENDED, HRESULT(0));
             }
+        }
+        if !topology_ready && preparing_since.elapsed() > Duration::from_secs(10) {
+            return Err(Error::from_hresult(E_FAIL));
         }
         if topology_ready {
             // Absolute requests are idempotent if both the host accelerator

@@ -62,7 +62,11 @@ jobs:
       - name: Build release binaries
         run: cargo build --release
 
-      - name: Build installer
+      - name: Prepare playback runtime
+        shell: pwsh
+        run: ./scripts/prepare-libvlc.ps1
+
+      - name: Package installer
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
         with:
           path: installer/arcthumb.iss
@@ -83,5 +87,6 @@ jobs:
           path: |
             target/release/arcthumb.dll
             target/release/arcthumb-config.exe
+            target/release/libvlc/
           if-no-files-found: error
           retention-days: 14
