@@ -221,12 +221,17 @@ fn validate_video_paint(hwnd: HWND, this: &ArcThumbPreviewHandler) {
 /// a debounced rebuild.
 fn paint(hwnd: HWND, this: &ArcThumbPreviewHandler, commit: bool) {
     let mut ps = PAINTSTRUCT::default();
-    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let window_dc = unsafe { BeginPaint(hwnd, &mut ps) };
 
     let mut client = RECT::default();
     let _ = unsafe { GetClientRect(hwnd, &mut client) };
     let cw = client.right - client.left;
     let ch = client.bottom - client.top;
+    let mut surface = this.surface.borrow_mut();
+    let Some(hdc) = surface.prepare(window_dc, cw, ch) else {
+        let _ = unsafe { EndPaint(hwnd, &ps) };
+        return;
+    };
 
     // Erase background.
     let brush = system_window_brush();
@@ -281,6 +286,7 @@ fn paint(hwnd: HWND, this: &ArcThumbPreviewHandler, commit: bool) {
         draw_video_banner(hdc, &client, text);
     }
 
+    surface.present(window_dc, client);
     let _ = unsafe { EndPaint(hwnd, &ps) };
 }
 

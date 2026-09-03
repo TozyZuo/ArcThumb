@@ -2,6 +2,7 @@
 //! to arcthumb.dll is loaded; PATH, the working directory and installed VLC are
 //! never searched. Media and decoded frames stay in bounded memory.
 
+use super::super::surface::Surface;
 use super::*;
 use std::cell::UnsafeCell;
 use std::ffi::{CStr, OsString, c_char, c_int};
@@ -157,54 +158,61 @@ pub(super) struct Frames {
 impl Frames {
     // Called only on the UI thread. A decoder can never hold up Explorer: if
     // publication is in progress, leave the existing surface for the next frame.
-    pub(super) fn paint(&self, dc: HDC, rect: RECT) -> bool {
+    pub(super) fn paint(&self, dc: HDC, rect: RECT, surface: &mut Surface) -> bool {
         if !self.active.load(Ordering::Acquire) {
             return false;
         }
-        if let Ok(frame) = self.latest.try_lock() {
-            unsafe {
-                let _ = PatBlt(dc, 0, 0, rect.right, rect.bottom, BLACKNESS);
-            }
-            if let Some(frame) = frame.as_ref() {
-                let scale = (rect.right as f64 / frame.width as f64)
-                    .min(rect.bottom as f64 / frame.height as f64);
-                let w = (frame.width as f64 * scale).round() as i32;
-                let h = (frame.height as f64 * scale).round() as i32;
-                let info = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: (frame.pitch / 4) as i32,
-                        biHeight: -(frame.height as i32),
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return true;
+        }
+        if let Ok(frame) = self.latest.try_lock()
+            && let Some(frame) = frame.as_ref()
+        {
+            let Some(buffer_dc) = surface.prepare(dc, width, height) else {
+                return true;
+            };
+            let scale =
+                (width as f64 / frame.width as f64).min(height as f64 / frame.height as f64);
+            let w = (frame.width as f64 * scale).round() as i32;
+            let h = (frame.height as f64 * scale).round() as i32;
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: (frame.pitch / 4) as i32,
+                    biHeight: -(frame.height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
                     ..Default::default()
-                };
-                unsafe {
-                    // Default BLACKONWHITE stretching combines colour bits
-                    // when shrinking and visibly posterizes live photos.
-                    SetStretchBltMode(dc, STRETCH_HALFTONE);
-                    let _ = SetBrushOrgEx(dc, 0, 0, None);
-                    StretchDIBits(
-                        dc,
-                        (rect.right - w) / 2,
-                        (rect.bottom - h) / 2,
-                        w,
-                        h,
-                        0,
-                        0,
-                        frame.width as i32,
-                        frame.height as i32,
-                        Some(frame.pixels.as_ptr().cast()),
-                        &info,
-                        DIB_RGB_COLORS,
-                        SRCCOPY,
-                    );
-                }
+                },
+                ..Default::default()
+            };
+            unsafe {
+                // Default BLACKONWHITE stretching combines colour bits
+                // when shrinking and visibly posterizes live photos.
+                let _ = PatBlt(buffer_dc, 0, 0, width, height, BLACKNESS);
+                SetStretchBltMode(buffer_dc, STRETCH_HALFTONE);
+                let _ = SetBrushOrgEx(buffer_dc, 0, 0, None);
+                StretchDIBits(
+                    buffer_dc,
+                    (width - w) / 2,
+                    (height - h) / 2,
+                    w,
+                    h,
+                    0,
+                    0,
+                    frame.width as i32,
+                    frame.height as i32,
+                    Some(frame.pixels.as_ptr().cast()),
+                    &info,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
             }
         }
+        surface.present(dc, rect);
         true
     }
 }

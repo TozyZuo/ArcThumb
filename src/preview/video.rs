@@ -132,6 +132,8 @@ pub(super) struct VideoPlayer {
     playback_request: Arc<AtomicU32>,
     wants_playback: Arc<AtomicBool>,
     frames: Arc<vlc::Frames>,
+    // GDI resources belong to the preview's STA, never the decoder worker.
+    surface: std::cell::RefCell<super::surface::Surface>,
 }
 
 static ACTIVE_WORKERS: AtomicU32 = AtomicU32::new(0);
@@ -238,11 +240,12 @@ impl VideoPlayer {
             playback_request,
             wants_playback,
             frames,
+            surface: Default::default(),
         })
     }
 
     pub(super) fn paint(&self, dc: HDC, rect: RECT) -> bool {
-        self.frames.paint(dc, rect)
+        self.frames.paint(dc, rect, &mut self.surface.borrow_mut())
     }
 
     pub(super) fn pause(&self) {

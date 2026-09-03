@@ -31,6 +31,7 @@
 
 mod load;
 mod render;
+mod surface;
 mod video;
 
 use std::cell::{Cell, RefCell};
@@ -162,6 +163,8 @@ pub struct ArcThumbPreviewHandler {
     /// Cached HBITMAP at the last drawn (width, height). Replaced on
     /// resize. Freed via `CachedBitmap::Drop`.
     pub(crate) cache: RefCell<Option<CachedBitmap>>,
+    /// Compose the cover and controls offscreen to avoid white transition flashes.
+    surface: RefCell<surface::Surface>,
     /// A resize timer requests a cache rebuild in the next WM_PAINT.
     pub(crate) resize_ready: Cell<bool>,
     /// Bounded MOV payload extracted from a LIVP. Shared with a playback
@@ -412,6 +415,7 @@ impl IPreviewHandler_Impl for ArcThumbPreviewHandler_Impl {
                 }
             }
             *self.this.cache.borrow_mut() = None;
+            *self.this.surface.borrow_mut() = Default::default();
             self.this.resize_ready.set(false);
             *self.this.source.borrow_mut() = None;
             *self.this.stream.borrow_mut() = None;
