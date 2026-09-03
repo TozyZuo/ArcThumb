@@ -344,6 +344,7 @@ fn run_worker_with_fallback(
             &receiver,
             Arc::clone(&shutdown),
             Arc::clone(&request),
+            &wants_playback,
         ) {
             Ok(()) => return Ok(()),
             Err(error) => alog!(
@@ -374,6 +375,7 @@ fn run_worker(
     receiver: &Receiver<PlayerCommand>,
     shutdown: Arc<AtomicBool>,
     playback_request: Arc<AtomicU32>,
+    wants_playback: &AtomicBool,
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
     struct ComApartment;
@@ -397,7 +399,15 @@ fn run_worker(
 
     // Guard declaration order ensures Media Foundation shuts down before the
     // COM apartment on success, error, and panic alike.
-    run_worker_initialized(bytes, target, size, receiver, &shutdown, &playback_request)
+    run_worker_initialized(
+        bytes,
+        target,
+        size,
+        receiver,
+        &shutdown,
+        &playback_request,
+        wants_playback,
+    )
 }
 
 fn run_worker_initialized(
@@ -407,6 +417,7 @@ fn run_worker_initialized(
     receiver: &Receiver<PlayerCommand>,
     shutdown: &AtomicBool,
     playback_request: &AtomicU32,
+    wants_playback: &AtomicBool,
 ) -> Result<()> {
     let stream = unsafe { SHCreateMemStream(Some(bytes.as_ref())) }
         .ok_or_else(|| Error::from_hresult(E_FAIL))?;
@@ -495,6 +506,9 @@ fn run_worker_initialized(
                 // decoded frames may still be queued in the renderer then.
                 playing = false;
                 ended = true;
+                // A later renderer/device error must not replay a finished clip
+                // when switching to the fallback engine.
+                wants_playback.store(false, Ordering::Release);
                 target.notify(NOTICE_ENDED, HRESULT(0));
             }
         }

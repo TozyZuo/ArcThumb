@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACKNESS, DIB_RGB_COLORS, HDC, PatBlt, SRCCOPY,
-    StretchDIBits,
+    STRETCH_HALFTONE, SetBrushOrgEx, SetStretchBltMode, StretchDIBits,
 };
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -183,6 +183,10 @@ impl Frames {
                     ..Default::default()
                 };
                 unsafe {
+                    // Default BLACKONWHITE stretching combines colour bits
+                    // when shrinking and visibly posterizes live photos.
+                    SetStretchBltMode(dc, STRETCH_HALFTONE);
+                    let _ = SetBrushOrgEx(dc, 0, 0, None);
                     StretchDIBits(
                         dc,
                         (rect.right - w) / 2,
