@@ -438,7 +438,7 @@ fn instance(api: &Api) -> Result<Handle> {
                 c"--no-lua",
                 c"--no-spu",
                 c"--avcodec-hw=none",
-                c"--avcodec-threads=2",
+                c"--avcodec-threads=4",
                 c"--file-caching=100",
                 c"--quiet",
             ];
@@ -465,7 +465,7 @@ fn run_player(
 ) -> Result<()> {
     let api = player.api;
     frames.active.store(true, Ordering::Release);
-    alog!("LIVP: LibVLC software fallback prepared (memory input, two decode threads)");
+    alog!("LIVP: LibVLC software fallback prepared (memory input, four decode threads)");
     let mut last_state = 0;
     let mut started = false;
     let mut start_time = Instant::now();
